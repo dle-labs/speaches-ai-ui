@@ -1,0 +1,2 @@
+# Preserve vendored upstream skill documents, including Markdown hard breaks.
+.agents/skills/** whitespace=-blank-at-eol,-blank-at-eof
