@@ -1,0 +1,26 @@
+[package]
+name = "speaches-ai"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Keyboard-first Speaches dictation for Linux"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+gpui-kit = "=0.7.3"
+cpal = "0.15"
+hound = "3.5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-channel = "2"
+x11rb = { version = "0.13", features = ["xtest"] }
+fs2 = "0.4"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

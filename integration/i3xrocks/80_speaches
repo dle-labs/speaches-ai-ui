@@ -1,0 +1,5 @@
+[speaches]
+command=exec "$HOME/.local/bin/speaches-ai" bar-watch
+interval=persist
+format=json
+markup=pango
