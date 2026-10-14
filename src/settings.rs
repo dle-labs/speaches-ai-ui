@@ -16,6 +16,8 @@ pub(crate) struct Settings {
     pub(crate) quit_on_ctrl_q: bool,
     pub(crate) toggle_shortcut: String,
     pub(crate) cancel_shortcut: String,
+    pub(crate) language_shortcut: String,
+    pub(crate) quick_languages: Vec<String>,
     pub(crate) animate_bar: bool,
     #[serde(skip)]
     pub(crate) api_key: String,
@@ -35,6 +37,8 @@ impl Default for Settings {
             quit_on_ctrl_q: false,
             toggle_shortcut: "Ctrl+Alt+Space".into(),
             cancel_shortcut: "Ctrl+Shift+X".into(),
+            language_shortcut: "Ctrl+Alt+Shift+L".into(),
+            quick_languages: crate::language::default_quick_languages(),
             animate_bar: true,
         }
     }
@@ -54,7 +58,15 @@ impl Settings {
         }
         let bytes = fs::read(path)?;
         anyhow::ensure!(bytes.len() <= 64 * 1024, "Settings file exceeds size limit");
-        Ok(serde_json::from_slice(&bytes)?)
+        let mut settings: Self = serde_json::from_slice(&bytes)?;
+        // Keep manually edited favorites bounded and unique before they become UI IDs.
+        settings.quick_languages =
+            crate::language::validate_quick_languages(&settings.quick_languages)
+                .unwrap_or_else(|_| crate::language::default_quick_languages());
+        if let Ok(code) = crate::language::normalize(&settings.language) {
+            settings.language = code;
+        }
+        Ok(settings)
     }
     pub(crate) fn save(&self) -> Result<()> {
         let path = Self::path()?;
@@ -94,18 +106,27 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"copy":true}"#).unwrap();
         assert_eq!(settings.toggle_shortcut, "Ctrl+Alt+Space");
         assert_eq!(settings.cancel_shortcut, "Ctrl+Shift+X");
+        assert_eq!(settings.language_shortcut, "Ctrl+Alt+Shift+L");
+        assert_eq!(
+            settings.quick_languages,
+            crate::language::default_quick_languages()
+        );
     }
     #[test]
     fn custom_shortcut_round_trips() {
         let settings = Settings {
             toggle_shortcut: "Super+Shift+F9".into(),
             cancel_shortcut: "Super+Shift+F10".into(),
+            language_shortcut: "Super+Shift+F11".into(),
+            quick_languages: vec!["en".into(), "fr".into()],
             ..Settings::default()
         };
         let restored: Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored.toggle_shortcut, settings.toggle_shortcut);
         assert_eq!(restored.cancel_shortcut, settings.cancel_shortcut);
+        assert_eq!(restored.language_shortcut, settings.language_shortcut);
+        assert_eq!(restored.quick_languages, settings.quick_languages);
     }
     #[test]
     fn animation_defaults_on_and_respects_saved_reduced_motion() {

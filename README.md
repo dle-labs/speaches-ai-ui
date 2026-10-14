@@ -16,17 +16,23 @@ Default model: `deepdml/faster-whisper-large-v3-turbo-ct2`. Use **Save and check
 
 1. Select the backend/model, language (blank = automatic), and microphone.
 2. Select completion actions and **Save settings**. Copy, paste, and the completion chime are initially off. Enable **Enable completion chime (short tone)** for a quiet 100 ms tone, then Save settings. Existing saved chime preferences are preserved.
-3. Set **Keyboard shortcuts → Recording toggle**, then **Save settings** (default: **Ctrl+Alt+Space**). Hide the window, focus your destination application, and press your shortcut.
-4. Press the same shortcut again to stop and transcribe. Press **Ctrl+Shift+X** to cancel recording/transcription or discard held audio instead (also configurable).
-5. Reopen the app to read or copy the latest transcript.
+3. Set **Keyboard shortcuts → Recording toggle**, then **Save settings** (default: **Ctrl+Alt+Space**).
+4. Choose a language using the quick buttons, or right-click the bar indicator for compact model/language preferences. **Ctrl+Alt+Shift+L** cycles quick languages without opening a window.
+5. Hide the window, focus your destination, and press the recording shortcut to start. Press it again to stop and transcribe. Press **Ctrl+Shift+X** to cancel recording/transcription or discard held audio instead (also configurable).
+6. Reopen the app to read or copy the latest transcript.
 
-The visible Record button works too, but does not guess a paste destination. Settings edits take effect after Save; a running recording/request keeps its original snapshot.
+The visible Record button works too, but does not guess a paste destination. Full-form edits take effect after Save; quick choices apply immediately to future recordings. A running recording/request keeps its original snapshot.
 
 **Ctrl+Q hides**, unless the saved “Ctrl+Q quits application” setting is enabled. The close button always hides. **Quit application** always exits. Hidden windows are recreated from app-owned state; audio/network operations survive hiding.
 
 ```sh
 ./target/debug/speaches-ai show    # launch or reveal existing window
 ./target/debug/speaches-ai toggle  # remote start/stop (running app required)
+./target/debug/speaches-ai preferences   # compact model/language panel only
+./target/debug/speaches-ai language-next # cycle configured quick languages
+./target/debug/speaches-ai language de   # request German (auto for detection)
+./target/debug/speaches-ai model MODEL_ID # request a model from discovery
+./target/debug/speaches-ai selection     # read selected model/language as JSON
 ./target/debug/speaches-ai status  # readable status text
 ./target/debug/speaches-ai bar     # static colored icon (Pango markup)
 # bar-watch is the persistent i3xrocks worker, not a GUI launch command.
@@ -44,8 +50,8 @@ The visible Record button works too, but does not guess a paste destination. Set
 - API keys are **session-only** and excluded from persisted settings. Secure keyring persistence is deferred. No transcript/audio history is written to disk.
 - Configuration: `$XDG_CONFIG_HOME/speaches-ai/settings.json` (normally `~/.config/speaches-ai/settings.json`). IPC: private `$XDG_RUNTIME_DIR/speaches-ai/` socket.
 - HTTP uploads never follow redirects; HTTPS verification remains enabled. Remote HTTP sends audio/credentials unencrypted—use HTTPS or your trusted local forward.
-- Both global shortcuts are configurable and saved: **Ctrl+Alt+Space** toggles recording, **Ctrl+Shift+X** cancels/discards. They work while the window is hidden and do not change focus. Cancel aborts the active operation, discards temporary audio, and suppresses pending paste; it cannot undo a paste already delivered. Choose distinct combinations and Save settings. Both rebind together; invalid, duplicate, or taken combinations preserve the previous settings and bindings. Cancel takes priority over queued toggles.
-- Supported modifiers: Ctrl/Control, Alt, Shift, Super/Win; keys: letters, digits, Space, F1–F24, Tab, Enter/Return, Escape/Esc, arrows, Home, End, PageUp/PageDown, Insert, Delete, Backspace. At least Ctrl, Alt, or Super is required; Ctrl+Q stays reserved for hide/quit, and Ctrl+V/Ctrl+Shift+V for paste. The key must exist in the current keyboard layout's base group (shifted-only function keys are rejected). Alternatively bind `speaches-ai toggle` and `speaches-ai cancel` through i3. Keyboard mapping changes currently require restarting the app.
+- All three global shortcuts are configurable and saved: **Ctrl+Alt+Space** toggles recording, **Ctrl+Shift+X** cancels/discards, and **Ctrl+Alt+Shift+L** cycles quick languages. They work while the window is hidden and do not change focus. Cancel aborts the active operation, discards temporary audio, and suppresses pending paste; it cannot undo a paste already delivered. Choose distinct combinations and Save settings. All three rebind together; invalid, duplicate, or taken combinations preserve the previous settings and bindings. Cancel takes priority over queued toggles.
+- Supported modifiers: Ctrl/Control, Alt, Shift, Super/Win; keys: letters, digits, Space, F1–F24, Tab, Enter/Return, Escape/Esc, arrows, Home, End, PageUp/PageDown, Insert, Delete, Backspace. At least Ctrl, Alt, or Super is required; Ctrl+Q stays reserved for hide/quit, and Ctrl+V/Ctrl+Shift+V for paste. The key must exist in the current keyboard layout's base group (shifted-only function keys are rejected). Alternatively bind `speaches-ai toggle`, `speaches-ai cancel`, and `speaches-ai language-next` through i3. Keyboard mapping changes currently require restarting the app.
 - Deferred: backend model management, persisted history, recording export, autostart UI, full V1 multi-failure recovery, and Wayland support.
 
 ## Install or update the app
@@ -75,7 +81,17 @@ The supplied block is `integration/i3xrocks/80_speaches`. The installed Regolith
 
 **Inspect your existing user directory first.** If it does not exist, follow Regolith's setup for retaining your chosen stock blocks (including `01_setup`) before creating it; a partial user directory can change which stock blocks are shown. Do not overwrite existing configuration blindly.
 
-Copy the supplied block into the established user `conf.d` directory. It runs one persistent `bar-watch` process (`interval=persist`, `format=json`, `markup=pango`), rather than spawning a command for every animation frame. Left-click events arrive as JSON on stdin and show the window. Status polling never launches the app; an explicit click can.
+Copy the supplied block into the established user `conf.d` directory. It runs one persistent `bar-watch` process (`interval=persist`, `format=json`, `markup=pango`), rather than spawning a command for every animation frame. Click events arrive as JSON on stdin: **left-click** opens the full app, **right-click** opens compact model/language preferences, and **middle-click** cycles quick languages. Status polling never launches the app; explicit left/right clicks can. Right-click on an offline indicator launches only the compact panel.
+
+### Quick model and language preferences
+
+Right-click opens a small native floating **Quick preferences** panel, not the full app. It uses searchable language/model selectors, displays the current choices, and saves selections immediately. **Refresh models** performs model discovery only; selecting an ID does not explicitly load/unload a backend model. Model language support depends on the backend/model. Escape closes an open selector first, then the panel; Done or switching focus away also dismisses it. A native dialog is used for reliable i3 floating/focus behavior rather than an unsupported anchored X11 popup.
+
+Default quick languages are **Auto → English → German**. Edit **Quick languages (comma-separated)** in the main app, e.g. `en, de, fr`, then Save settings. One to eight languages can be configured; the order controls both buttons and keyboard/middle-click cycling. The compact language selector also offers the full language catalog.
+
+The bar shows the current language (`Auto`, `EN`, `DE`, etc.). Selections apply to the **next recording**; an active recording/request keeps its original model and language. If they differ, the bar shows e.g. `EN → DE` (active → next). Language changes do not change the model. Manual retry uses current settings only after renewed confirmation.
+
+Selections stay synchronized across the panel, bar, keyboard, and main app. Quick choices do not save unrelated unfinished form edits. If a quick choice cannot be saved, the previous selection remains active and an error is shown. CLI selection commands acknowledge queuing; `selection` reports the applied choices and any error.
 
 ### Bar appearance
 
@@ -111,6 +127,7 @@ Additional smoke tests take an absolute artifact directory (outside the reposito
 python tests/bar_smoke.py /path/to/test-artifacts/bar
 python tests/install_local_smoke.py /path/to/existing-test-artifacts
 xvfb-run -a python tests/desktop_smoke.py /path/to/test-artifacts/desktop
+xvfb-run -a python tests/preferences_smoke.py /path/to/test-artifacts/preferences
 ```
 
 The bar test uses fake IPC; installer tests mock build/app/i3 operations and never modify the live desktop. Tests use synthetic samples/mock HTTP servers, not microphone recording or live backend inference. Real desktop/audio validation is separate; see [prototype-status.md](docs/prototype-status.md).

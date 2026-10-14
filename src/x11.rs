@@ -72,6 +72,7 @@ struct Shortcut {
 pub enum HotkeyAction {
     Toggle,
     Cancel,
+    CycleLanguage,
 }
 
 #[derive(PartialEq, Eq)]
@@ -119,9 +120,9 @@ pub struct Desktop {
     owner: Rc<()>,
     targets: RefCell<HashMap<Window, Rc<Cell<bool>>>>,
     keys: Keys,
-    bindings: RefCell<Option<[Binding; 2]>>,
+    bindings: RefCell<Option<[Binding; 3]>>,
     mapping_changed: Cell<bool>,
-    hotkeys: RefCell<[HotkeyState; 2]>,
+    hotkeys: RefCell<[HotkeyState; 3]>,
 }
 
 impl Desktop {
@@ -293,22 +294,26 @@ impl Desktop {
         }
     }
 
-    /// Replaces both shortcuts as one transaction, returning canonical names.
-    /// Invalid or conflicting bindings leave both previous bindings intact.
+    /// Replaces all shortcuts as one transaction, returning canonical names.
+    /// Invalid or conflicting bindings leave all previous bindings intact.
     /// Keyboard-map changes still require reconnecting this adapter.
-    pub fn register_hotkeys(&self, toggle: &str, cancel: &str) -> Result<(String, String)> {
+    pub fn register_hotkeys(
+        &self,
+        toggle: &str,
+        cancel: &str,
+        cycle_language: &str,
+    ) -> Result<(String, String, String)> {
         let next = [
             resolve_binding(&self.keys, parse_shortcut(toggle)?)?,
             resolve_binding(&self.keys, parse_shortcut(cancel)?)?,
+            resolve_binding(&self.keys, parse_shortcut(cycle_language)?)?,
         ];
-        ensure!(
-            !bindings_overlap(&next[0], &next[1]),
-            "Toggle and cancel shortcuts must use distinct keyboard chords"
-        );
+        validate_bindings(&next)?;
         self.drain_events()?;
         let names = (
             next[0].shortcut.display.clone(),
             next[1].shortcut.display.clone(),
+            next[2].shortcut.display.clone(),
         );
         if self.bindings.borrow().as_ref() == Some(&next) {
             return Ok(names);
@@ -359,8 +364,8 @@ impl Desktop {
                     }
                 }
                 return Err(error.context(format!(
-                    "Cannot register {} and {}; another application may own a shortcut",
-                    names.0, names.1
+                    "Cannot register {}, {}, and {}; another application may own a shortcut",
+                    names.0, names.1, names.2
                 )));
             }
         };
@@ -392,7 +397,8 @@ impl Desktop {
         Ok(())
     }
 
-    /// Nonblocking drain; cancel takes priority and discards queued toggles.
+    /// Nonblocking drain; cancel discards queued toggles, but preserves cycles.
+    /// Language cycles take priority over toggles so new captures use that language.
     /// Also invalidates destroyed targets, even when no action is pending.
     pub fn poll_hotkey(&self) -> Result<Option<HotkeyAction>> {
         self.drain_events()?;
@@ -494,11 +500,14 @@ impl Desktop {
     }
 }
 
-fn take_hotkey(hotkeys: &mut [HotkeyState; 2]) -> Option<HotkeyAction> {
+fn take_hotkey(hotkeys: &mut [HotkeyState; 3]) -> Option<HotkeyAction> {
     if hotkeys[1].pending > 0 {
         hotkeys[0].pending = 0;
         hotkeys[1].pending -= 1;
         Some(HotkeyAction::Cancel)
+    } else if hotkeys[2].pending > 0 {
+        hotkeys[2].pending -= 1;
+        Some(HotkeyAction::CycleLanguage)
     } else if hotkeys[0].pending > 0 {
         hotkeys[0].pending -= 1;
         Some(HotkeyAction::Toggle)
@@ -507,11 +516,23 @@ fn take_hotkey(hotkeys: &mut [HotkeyState; 2]) -> Option<HotkeyAction> {
     }
 }
 
+fn validate_bindings(bindings: &[Binding; 3]) -> Result<()> {
+    for (index, left) in bindings.iter().enumerate() {
+        for right in &bindings[index + 1..] {
+            ensure!(
+                !bindings_overlap(left, right),
+                "Toggle, cancel, and cycle-language shortcuts must use distinct keyboard chords"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn bindings_overlap(left: &Binding, right: &Binding) -> bool {
     left.keycode == right.keycode && left.masks.iter().any(|mask| right.masks.contains(mask))
 }
 
-fn grab_tuples(bindings: &[Binding; 2]) -> Vec<(u8, u16)> {
+fn grab_tuples(bindings: &[Binding; 3]) -> Vec<(u8, u16)> {
     bindings
         .iter()
         .flat_map(|binding| binding.masks.iter().map(|&mask| (binding.keycode, mask)))
@@ -718,6 +739,7 @@ mod tests {
             ("super+esc", "Super+Escape"),
             ("ctrl+9", "Ctrl+9"),
             ("ctrl+shift+q", "Ctrl+Shift+Q"),
+            ("alt+shift+control+l", "Ctrl+Alt+Shift+L"),
         ] {
             assert_eq!(parse_shortcut(input).unwrap().display, expected);
         }
@@ -837,14 +859,19 @@ mod tests {
         let c = key_for(u32::from(b'c'))?;
         let x = key_for(u32::from(b'x'))?;
         let d = key_for(u32::from(b'd'))?;
+        let l = key_for(u32::from(b'l'))?;
         let alt = key_for(XK_ALT_L)?;
         let ctrl = [desktop.keys.control];
         let ctrl_alt = [desktop.keys.control, alt];
         let ctrl_shift = [desktop.keys.control, desktop.keys.shift];
+        let ctrl_alt_shift = [desktop.keys.control, alt, desktop.keys.shift];
+        let cycle = "Ctrl+Alt+Shift+L";
         assert_eq!(
-            desktop.register_hotkeys("Control+Alt+Space", "Ctrl+Shift+X")?,
-            ("Ctrl+Alt+Space".into(), "Ctrl+Shift+X".into())
+            desktop.register_hotkeys("Control+Alt+Space", "Ctrl+Shift+X", cycle)?,
+            ("Ctrl+Alt+Space".into(), "Ctrl+Shift+X".into(), cycle.into())
         );
+        trigger(l, &ctrl_alt_shift)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
         trigger(space, &ctrl_alt)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         trigger(x, &ctrl_shift)?;
@@ -857,7 +884,7 @@ mod tests {
         }
         input(KEY_PRESS_EVENT, x)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
-        desktop.register_hotkeys("ctrl+alt+space", "control+shift+x")?;
+        desktop.register_hotkeys("ctrl+alt+space", "control+shift+x", cycle)?;
         input(KEY_PRESS_EVENT, x)?;
         assert_eq!(desktop.poll_hotkey()?, None);
         input(KEY_RELEASE_EVENT, x)?;
@@ -866,33 +893,66 @@ mod tests {
         }
         desktop.poll_hotkey()?;
 
-        // Both activations in one drain: cancel discards queued toggles.
+        // Cancel discards toggles but preserves every queued language cycle.
         trigger(space, &ctrl_alt)?;
+        trigger(l, &ctrl_alt_shift)?;
+        trigger(l, &ctrl_alt_shift)?;
         trigger(x, &ctrl_shift)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
         assert_eq!(desktop.poll_hotkey()?, None);
+        trigger(space, &ctrl_alt)?;
+        trigger(l, &ctrl_alt_shift)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         assert!(
             desktop
-                .register_hotkeys("Ctrl+Space", "Control+space")
+                .register_hotkeys("Ctrl+Space", "Control+space", cycle)
                 .is_err()
         );
-        assert!(desktop.register_hotkeys("Ctrl+Q", "Ctrl+B").is_err());
+        assert!(desktop.register_hotkeys("Ctrl+Q", "Ctrl+B", cycle).is_err());
+        assert!(
+            desktop
+                .register_hotkeys("Ctrl+B", "Ctrl+X", "Control+b")
+                .is_err()
+        );
+        assert!(
+            desktop
+                .register_hotkeys("Ctrl+B", "Ctrl+X", "Control+x")
+                .is_err()
+        );
+        assert!(
+            desktop
+                .register_hotkeys("Ctrl+B", "Ctrl+X", "Ctrl+Q")
+                .is_err()
+        );
+        trigger(l, &ctrl_alt_shift)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
         trigger(space, &ctrl_alt)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         trigger(x, &ctrl_shift)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
 
-        desktop.register_hotkeys("Ctrl+B", "Ctrl+Space")?;
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+Space", cycle)?;
         trigger(b, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         trigger(space, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
-        desktop.register_hotkeys("Ctrl+Space", "Ctrl+B")?;
+        desktop.register_hotkeys("Ctrl+Space", "Ctrl+B", cycle)?;
         trigger(b, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
         trigger(space, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
-        desktop.register_hotkeys("Ctrl+B", "Ctrl+X")?;
+        // A three-way rotation reuses the union of grabs without ungrabbing it.
+        desktop.register_hotkeys(cycle, "Ctrl+Space", "Ctrl+B")?;
+        trigger(l, &ctrl_alt_shift)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
+        trigger(space, &ctrl)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
+        trigger(b, &ctrl)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+X", cycle)?;
 
         let masks = grab_masks(u16::from(ModMask::CONTROL), desktop.keys.lock_mask);
         // All old lock variants must now be free to another connection.
@@ -924,23 +984,33 @@ mod tests {
             )?
             .check()?;
         // First binding D succeeds; second C fails on its last lock variant.
-        assert!(desktop.register_hotkeys("Ctrl+D", "Ctrl+C").is_err());
+        assert!(desktop.register_hotkeys("Ctrl+D", "Ctrl+C", cycle).is_err());
+        // Third binding C fails after BOTH earlier bindings acquired new grabs.
+        assert!(
+            desktop
+                .register_hotkeys("Ctrl+D", "Ctrl+Space", "Ctrl+C")
+                .is_err()
+        );
+        trigger(l, &ctrl_alt_shift)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
         trigger(b, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         trigger(x, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
-        for &mask in &masks {
-            other
-                .grab_key(
-                    false,
-                    root,
-                    ModMask::from(mask),
-                    d,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                )?
-                .check()?;
-            other.ungrab_key(d, root, ModMask::from(mask))?.check()?;
+        for key in [d, space] {
+            for &mask in &masks {
+                other
+                    .grab_key(
+                        false,
+                        root,
+                        ModMask::from(mask),
+                        key,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                    )?
+                    .check()?;
+                other.ungrab_key(key, root, ModMask::from(mask))?.check()?;
+            }
         }
         for &mask in masks.iter().filter(|&&mask| mask != conflict) {
             other
@@ -958,7 +1028,7 @@ mod tests {
         other
             .ungrab_key(c, root, ModMask::from(conflict))?
             .check()?;
-        assert!(desktop.register_hotkeys("Ctrl+B", "Ctrl+Q").is_err());
+        assert!(desktop.register_hotkeys("Ctrl+B", "Ctrl+Q", cycle).is_err());
         trigger(b, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
 
@@ -982,8 +1052,10 @@ mod tests {
             assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         }
 
-        // Same physical trigger, different masks: releases update both states.
-        desktop.register_hotkeys("Ctrl+B", "Ctrl+Shift+B")?;
+        // Same physical trigger, different masks: releases update all states.
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+Shift+B", "Ctrl+Alt+B")?;
+        trigger(b, &ctrl_alt)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
         trigger(b, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
         trigger(b, &ctrl_shift)?;
@@ -992,18 +1064,36 @@ mod tests {
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Toggle));
 
         input(KEY_PRESS_EVENT, x)?;
-        desktop.register_hotkeys("Ctrl+B", "Ctrl+X")?;
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+X", cycle)?;
         assert_eq!(desktop.poll_hotkey()?, None);
         input(KEY_RELEASE_EVENT, x)?;
         assert_eq!(desktop.poll_hotkey()?, None);
         trigger(x, &ctrl)?;
         assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::Cancel));
+
+        input(KEY_PRESS_EVENT, c)?;
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+X", "Ctrl+C")?;
+        assert_eq!(desktop.poll_hotkey()?, None);
+        input(KEY_RELEASE_EVENT, c)?;
+        assert_eq!(desktop.poll_hotkey()?, None);
+        trigger(c, &ctrl)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
+
+        input(KEY_PRESS_EVENT, desktop.keys.control)?;
+        input(KEY_PRESS_EVENT, c)?;
+        assert_eq!(desktop.poll_hotkey()?, Some(HotkeyAction::CycleLanguage));
+        desktop.register_hotkeys("Ctrl+B", "Ctrl+X", "Control+c")?;
+        input(KEY_PRESS_EVENT, c)?;
+        assert_eq!(desktop.poll_hotkey()?, None);
+        input(KEY_RELEASE_EVENT, c)?;
+        input(KEY_RELEASE_EVENT, desktop.keys.control)?;
+        assert_eq!(desktop.poll_hotkey()?, None);
         Ok(())
     }
 
     #[test]
     fn cancel_discards_all_queued_toggles_without_resetting_held_state() {
-        let mut hotkeys = [HotkeyState::default(), HotkeyState::default()];
+        let mut hotkeys: [HotkeyState; 3] = Default::default();
         hotkeys[0].press(10);
         hotkeys[0].release_time = Some(20);
         hotkeys[0].press(30);
@@ -1016,6 +1106,66 @@ mod tests {
         hotkeys[1].release_time = Some(70);
         hotkeys[1].press(80);
         assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::Cancel));
+    }
+
+    #[test]
+    fn cancel_preserves_cycles_and_cycles_precede_toggle() {
+        let mut hotkeys: [HotkeyState; 3] = Default::default();
+        hotkeys[0].press(10);
+        hotkeys[1].press(20);
+        hotkeys[2].press(30);
+        hotkeys[2].release_time = Some(40);
+        hotkeys[2].press(50);
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::Cancel));
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::CycleLanguage));
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::CycleLanguage));
+        assert_eq!(take_hotkey(&mut hotkeys), None);
+
+        hotkeys[0].release_time = Some(60);
+        hotkeys[0].press(70);
+        hotkeys[2].release_time = Some(80);
+        hotkeys[2].press(90);
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::CycleLanguage));
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::Toggle));
+        assert_eq!(take_hotkey(&mut hotkeys), None);
+    }
+
+    #[test]
+    fn cycle_repeat_and_preheld_trigger_do_not_queue_extra_actions() {
+        let mut hotkeys: [HotkeyState; 3] = Default::default();
+        hotkeys[2].waiting_for_release = true;
+        hotkeys[2].press(10);
+        assert_eq!(take_hotkey(&mut hotkeys), None);
+        hotkeys[2].waiting_for_release = false;
+        hotkeys[2].release_time = Some(20);
+        hotkeys[2].press(30);
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::CycleLanguage));
+        hotkeys[2].press(40);
+        hotkeys[2].release_time = Some(50);
+        hotkeys[2].press(50);
+        assert_eq!(take_hotkey(&mut hotkeys), None);
+        hotkeys[2].release_time = Some(60);
+        hotkeys[2].press(70);
+        assert_eq!(take_hotkey(&mut hotkeys), Some(HotkeyAction::CycleLanguage));
+    }
+
+    #[test]
+    fn validation_rejects_overlap_in_every_pair_including_third_binding() {
+        let binding = |keycode| Binding {
+            shortcut: parse_shortcut("Ctrl+A").unwrap(),
+            keycode,
+            mask: 4,
+            masks: vec![4, 6],
+        };
+        for keycodes in [[8, 8, 9], [8, 9, 8], [8, 9, 9]] {
+            assert!(validate_bindings(&keycodes.map(binding)).is_err());
+        }
+        let distinct = [8, 9, 10].map(binding);
+        assert!(validate_bindings(&distinct).is_ok());
+        assert_eq!(
+            grab_tuples(&distinct),
+            vec![(8, 4), (8, 6), (9, 4), (9, 6), (10, 4), (10, 6)]
+        );
     }
 
     #[test]

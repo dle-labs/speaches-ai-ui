@@ -120,7 +120,7 @@ Acceptance tests:
 - Toggle while transcribing returns busy; stale completion cannot mutate the next job.
 - Backend A's active transcription completes normally after settings change to B; subsequent capture uses B. A stale A discovery response cannot overwrite B's settings view.
 
-## Phase 2 — Audio capture and global X11 toggle
+## Phase 2 — Audio capture and global X11 shortcuts
 
 **Skills:** Rust best practices (ownership/thread safety/errors/tests), gpui-kit (async/events), design guides for recording controls.
 
@@ -129,7 +129,7 @@ Tasks:
 - Reaching duration or memory limits stops capture without uploading. Retain available audio, show attention without focusing the window, and require explicit Submit, Save recording…, or Discard. Apply the two-recording decision policy if an older failed recording exists.
 - Convert channel/sample formats and encode a backend-supported audio format. Do not assume all devices support one fixed rate.
 - Stop/release the microphone before upload. Handle silence, device removal, overflow, and failed capture initialization.
-- Register native X11 global toggle and cancel shortcuts using verified APIs (defaults Ctrl+Alt+Space and Ctrl+Shift+X). Handle keymap changes, lock modifiers, auto-repeat, duplicate/conflicting chords, and all-or-nothing rollback when rebinding the pair.
+- Register native X11 global toggle, cancel, and quick-language-cycle shortcuts using verified APIs (defaults Ctrl+Alt+Space, Ctrl+Shift+X, and Ctrl+Alt+Shift+L). Handle keymap changes, lock modifiers, auto-repeat, duplicate/conflicting chords, and all-or-nothing rollback when rebinding the set.
 - Capture the external active window identity before recording, without activating the application. Track destruction and guard against XID reuse; uncertain identity disables paste, even if the same numeric XID exists. Never rely on window titles as identity.
 - Keep manual app-button capture from treating the app itself as a paste target.
 - Route the global cancel shortcut through the existing application cancel/discard policy, prioritizing it over queued toggles without stealing focus. Start/stop cues remain deferred; completion chime remains in scope.
@@ -198,7 +198,8 @@ Tasks:
 - Implement `speaches-ai status` and `speaches-ai show` client commands or equivalent names selected with the actual block protocol.
 - Publish bounded status snapshots only: state, elapsed time, and outcome category, not audio/transcript/secrets/window titles.
 - Choose update behavior after Phase 0 verification: supported persistent/event-driven delivery if available, otherwise bounded inexpensive polling. No backend polling from the bar.
-- Handle click events by showing the main application. Status polling itself must never launch it.
+- Handle left-click by showing the main application, right-click by opening compact model/language preferences, and middle-click by cycling configured quick languages. Status polling itself must never launch the application.
+- Display selected/active language; show active → next when a preference changes during a recording/request. Keep request snapshots immutable. Share selection commands between main buttons, compact preferences, keyboard, and IPC; do not save unrelated form drafts or silently lose a failed persistence update.
 - Provide an opt-in configuration template and installation/removal instructions using verified user-level paths.
 - Handle absent/crashed application and IPC version mismatch promptly; tolerate multiple monitor bars without duplicate capture services.
 - Use readable fallback text if icon fonts are absent. Keep animation optional and restrained.

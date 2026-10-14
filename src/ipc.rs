@@ -18,6 +18,8 @@ pub(crate) struct Server {
     path: PathBuf,
     pub(crate) commands: async_channel::Receiver<String>,
     pub(crate) status: Arc<Mutex<BarSnapshot>>,
+    /// Selected next-request preferences only; never credentials or transcripts.
+    pub(crate) selection: Arc<Mutex<serde_json::Value>>,
 }
 
 fn directory() -> Result<PathBuf> {
@@ -37,14 +39,26 @@ pub(crate) fn request(command: &str) -> Result<String> {
     stream.write_all(command.as_bytes())?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut reply = String::new();
-    stream.take(1024).read_to_string(&mut reply)?;
-    if !matches!(command, "status" | "bar" | "snapshot") && reply.trim() != "OK" {
+    stream.take(8192).read_to_string(&mut reply)?;
+    if !matches!(command, "status" | "bar" | "snapshot" | "selection") && reply.trim() != "OK" {
         bail!("The running application did not accept {command}; try again");
     }
     if reply.trim().is_empty() {
         bail!("Empty IPC response");
     }
     Ok(reply)
+}
+
+fn is_control_command(command: &str) -> bool {
+    matches!(
+        command,
+        "show" | "preferences" | "language-next" | "toggle" | "cancel" | "quit"
+    ) || command
+        .strip_prefix("language ")
+        .is_some_and(|value| crate::language::normalize(value).is_ok())
+        || command.strip_prefix("model ").is_some_and(|value| {
+            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+        })
 }
 
 impl Server {
@@ -66,17 +80,24 @@ impl Server {
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let (tx, commands) = async_channel::bounded(32);
-        let status = Arc::new(Mutex::new(BarSnapshot {
-            state: Status::Ready,
-            animate: true,
-        }));
+        let status = Arc::new(Mutex::new(BarSnapshot::with_languages(
+            Status::Ready,
+            true,
+            "",
+            None,
+        )));
+        let selection = Arc::new(Mutex::new(serde_json::json!({})));
+        let preferences = selection.clone();
         let state = status.clone();
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                 let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
                 let mut input = String::new();
-                if (&mut stream).take(64).read_to_string(&mut input).is_err() {
+                if (&mut stream).take(1025).read_to_string(&mut input).is_err()
+                    || input.len() > 1024
+                {
+                    let _ = writeln!(stream, "Invalid command");
                     continue;
                 }
                 let reply = match input.trim() {
@@ -86,14 +107,22 @@ impl Server {
                         .unwrap_or_else(|_| Status::Error.text()),
                     "bar" => state
                         .lock()
-                        .map(|s| s.state.bar())
+                        .map(|s| {
+                            let mut snapshot = s.clone();
+                            snapshot.animate = false;
+                            snapshot.markup(0)
+                        })
                         .unwrap_or_else(|_| Status::Error.bar()),
                     "snapshot" => state
                         .lock()
                         .ok()
                         .and_then(|s| serde_json::to_string(&*s).ok())
                         .unwrap_or_else(|| "null".into()),
-                    command @ ("show" | "toggle" | "cancel" | "quit") => {
+                    "selection" => preferences
+                        .lock()
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|_| "null".into()),
+                    command if is_control_command(command) => {
                         if tx.try_send(command.to_owned()).is_ok() {
                             "OK".into()
                         } else {
@@ -110,6 +139,7 @@ impl Server {
             path,
             commands,
             status,
+            selection,
         })
     }
 }
@@ -127,4 +157,20 @@ pub(crate) fn run_client(command: &str) -> Result<()> {
         Err(err) => bail!("Speaches AI is not running: {err}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preference_commands_are_bounded_and_validated() {
+        assert!(is_control_command("preferences"));
+        assert!(is_control_command("language-next"));
+        assert!(is_control_command("language de"));
+        assert!(is_control_command("language auto"));
+        assert!(is_control_command("model repo/model"));
+        assert!(!is_control_command("language <b>en</b>"));
+        assert!(!is_control_command("model model\nquit"));
+        assert!(!is_control_command(&format!("model {}", "x".repeat(513))));
+    }
 }

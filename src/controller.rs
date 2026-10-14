@@ -1,7 +1,7 @@
 use crate::{
-    audio, backend,
+    audio, backend, language,
     settings::Settings,
-    status::Status,
+    status::{BarSnapshot, Status},
     x11::{Desktop, HotkeyAction, Target},
 };
 use gpui_kit::*;
@@ -38,6 +38,10 @@ pub(crate) struct Controller {
     pub(crate) models: Vec<String>,
     pub(crate) models_revision: u64,
     pub(crate) window: Option<AnyWindowHandle>,
+    pub(crate) quick_window: Option<AnyWindowHandle>,
+    pub(crate) selection_error: Option<String>,
+    pub(crate) language_revision: u64,
+    pub(crate) model_selection_revision: u64,
     pub(crate) recording: Option<audio::Recording>,
     pub(crate) busy: bool,
     pub(crate) checking: bool,
@@ -68,13 +72,16 @@ impl Controller {
         };
         let (desktop, shortcut) = match Desktop::connect() {
             Ok(d) => {
-                let info = match d
-                    .register_hotkeys(&settings.toggle_shortcut, &settings.cancel_shortcut)
-                {
-                    Ok((toggle, cancel)) => {
+                let info = match d.register_hotkeys(
+                    &settings.toggle_shortcut,
+                    &settings.cancel_shortcut,
+                    &settings.language_shortcut,
+                ) {
+                    Ok((toggle, cancel, cycle)) => {
                         settings.toggle_shortcut = toggle.clone();
                         settings.cancel_shortcut = cancel.clone();
-                        format!("{toggle} toggles recording · {cancel} cancels/discards")
+                        settings.language_shortcut = cycle.clone();
+                        format!("{toggle}: record · {cancel}: cancel · {cycle}: language")
                     }
                     Err(e) => {
                         format!(
@@ -98,6 +105,10 @@ impl Controller {
             models: Vec::new(),
             models_revision: 0,
             window: None,
+            quick_window: None,
+            selection_error: None,
+            language_revision: 0,
+            model_selection_revision: 0,
             recording: None,
             busy: false,
             checking: false,
@@ -118,26 +129,54 @@ impl Controller {
         }
     }
     pub(crate) fn save_settings(&mut self, mut next: Settings, cx: &mut Context<Self>) -> bool {
+        let normalized = language::normalize(&next.language).and_then(|code| {
+            Ok((
+                code,
+                language::validate_quick_languages(&next.quick_languages)?,
+            ))
+        });
+        match normalized {
+            Ok((code, quick)) => {
+                next.language = code;
+                next.quick_languages = quick;
+            }
+            Err(error) => {
+                self.selection_error = Some(error.to_string());
+                self.notice = format!("Settings not applied: {error}");
+                cx.notify();
+                return false;
+            }
+        }
         // Register before changing either settings or persisted data. The X11
         // adapter rolls back new grabs if any key/lock variant conflicts.
         let binding = if let Some(desktop) = self.desktop.as_ref() {
-            desktop.register_hotkeys(&next.toggle_shortcut, &next.cancel_shortcut)
+            desktop.register_hotkeys(
+                &next.toggle_shortcut,
+                &next.cancel_shortcut,
+                &next.language_shortcut,
+            )
         } else if next.toggle_shortcut == self.settings.toggle_shortcut
             && next.cancel_shortcut == self.settings.cancel_shortcut
+            && next.language_shortcut == self.settings.language_shortcut
         {
-            Ok((next.toggle_shortcut.clone(), next.cancel_shortcut.clone()))
+            Ok((
+                next.toggle_shortcut.clone(),
+                next.cancel_shortcut.clone(),
+                next.language_shortcut.clone(),
+            ))
         } else {
             Err(anyhow::anyhow!(
                 "X11 is unavailable. Restart the app before changing its shortcuts"
             ))
         };
         match binding {
-            Ok((toggle, cancel)) => {
+            Ok((toggle, cancel, cycle)) => {
                 next.toggle_shortcut = toggle.clone();
                 next.cancel_shortcut = cancel.clone();
+                next.language_shortcut = cycle.clone();
                 if self.desktop.is_some() {
                     self.shortcut =
-                        format!("{toggle} toggles recording · {cancel} cancels/discards");
+                        format!("{toggle}: record · {cancel}: cancel · {cycle}: language");
                 }
                 self.shortcut_error = None;
             }
@@ -159,12 +198,93 @@ impl Controller {
             self.connection = "Not checked".into();
         }
         self.settings = next;
+        self.selection_error = None;
         self.notice = match self.settings.save() {
             Ok(()) => "Settings saved. API key is kept only for this session.".into(),
             Err(_) => "Settings applied for this session, but could not be saved.".into(),
         };
         cx.notify();
         true
+    }
+    /// Quick choices update only the next attempt, never the active request snapshot.
+    pub(crate) fn select_language(&mut self, value: &str, cx: &mut Context<Self>) -> bool {
+        match language::normalize(value) {
+            Ok(code) => {
+                let mut next = self.settings.clone();
+                next.language = code;
+                let applied = self.commit_selection(next, cx);
+                if applied {
+                    self.language_revision = self.language_revision.wrapping_add(1);
+                }
+                applied
+            }
+            Err(error) => {
+                self.selection_error = Some(error.to_string());
+                cx.notify();
+                false
+            }
+        }
+    }
+    pub(crate) fn select_model(&mut self, model: &str, cx: &mut Context<Self>) -> bool {
+        if model.is_empty()
+            || model.len() > 512
+            || model.chars().any(char::is_control)
+            || (model != self.settings.model && !self.models.iter().any(|id| id == model))
+        {
+            self.selection_error = Some(
+                "Model is not in the current backend list. Refresh models and try again.".into(),
+            );
+            cx.notify();
+            return false;
+        }
+        let mut next = self.settings.clone();
+        next.model = model.to_owned();
+        let applied = self.commit_selection(next, cx);
+        if applied {
+            self.model_selection_revision = self.model_selection_revision.wrapping_add(1);
+        }
+        applied
+    }
+    fn commit_selection(&mut self, next: Settings, cx: &mut Context<Self>) -> bool {
+        if next != self.settings {
+            // A quick choice saves and takes effect together, or keeps the old value.
+            if next.save().is_err() {
+                self.selection_error =
+                    Some("Could not save selection. Previous selection retained.".into());
+                cx.notify();
+                return false;
+            }
+            self.settings = next;
+        }
+        self.selection_error = None;
+        cx.notify();
+        true
+    }
+    pub(crate) fn cycle_language(&mut self, cx: &mut Context<Self>) {
+        let choices = language::validate_quick_languages(&self.settings.quick_languages)
+            .unwrap_or_else(|_| language::default_quick_languages());
+        if let Some(next) = language::next(&self.settings.language, &choices) {
+            self.select_language(next, cx);
+        }
+    }
+    pub(crate) fn bar_snapshot(&self) -> BarSnapshot {
+        let active = self.recording.is_some() || self.busy || self.pending_paste.is_some();
+        BarSnapshot::with_languages(
+            self.state(),
+            self.settings.animate_bar,
+            &self.settings.language,
+            active.then_some(self.snapshot.language.as_str()),
+        )
+    }
+    fn owns_focus(&self, cx: &mut App) -> bool {
+        [self.window, self.quick_window]
+            .into_iter()
+            .flatten()
+            .any(|window| {
+                window
+                    .update(cx, |_, window, _| window.is_window_active())
+                    .unwrap_or(false)
+            })
     }
     pub(crate) fn check(&mut self, cx: &mut Context<Self>) {
         if self.checking {
@@ -217,10 +337,7 @@ impl Controller {
                 return;
             }
             self.snapshot = self.settings.clone();
-            let own_active = self.window.is_some_and(|h| {
-                h.update(cx, |_, w, _| w.is_window_active())
-                    .unwrap_or(false)
-            });
+            let own_active = self.owns_focus(cx);
             self.target = if external && !own_active {
                 self.desktop
                     .as_ref()
@@ -347,12 +464,12 @@ impl Controller {
         if matches!(hotkey, Some(HotkeyAction::Cancel)) {
             self.cancel(cx);
         }
+        if matches!(hotkey, Some(HotkeyAction::CycleLanguage)) {
+            self.cycle_language(cx);
+        }
         if matches!(hotkey, Some(HotkeyAction::Toggle)) {
-            // A global shortcut invoked inside our own window has no external paste target.
-            let own_active = self.window.is_some_and(|h| {
-                h.update(cx, |_, w, _| w.is_window_active())
-                    .unwrap_or(false)
-            });
+            // Neither application window is an external paste destination.
+            let own_active = self.owns_focus(cx);
             self.toggle(!own_active, cx);
         }
         if let Some(r) = &self.recording {

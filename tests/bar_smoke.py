@@ -25,7 +25,7 @@ server.bind(short_path)
 server.listen()
 server.settimeout(0.2)
 stop = threading.Event()
-state = {"state": "Ready", "animate": True}
+state = {"state": "Ready", "animate": True, "language": "en"}
 commands = queue.Queue()
 
 
@@ -78,6 +78,7 @@ def until(predicate):
 try:
     initial = until(lambda frame: "\uf130" in frame)
     assert "foreground=" in initial
+    assert initial.endswith(" EN")
     time.sleep(0.3)
     assert frames.empty(), "Idle state should not redraw continuously"
     state["state"] = {"Recording": 75}
@@ -92,6 +93,8 @@ try:
     time.sleep(0.3)
     assert frames.empty(), "Reduced-motion mode should stop animation"
     process.stdin.write('{"button":1,"x":123,"":"ignored"}\n')
+    process.stdin.write('{"button":3}\n')
+    process.stdin.write('{"button":2}\n')
     process.stdin.flush()
     deadline = time.monotonic() + 3
     seen = []
@@ -100,14 +103,14 @@ try:
             seen.append(commands.get(timeout=0.2))
         except queue.Empty:
             continue
-        if "show" in seen:
+        if {"show", "preferences", "language-next"} <= set(seen):
             break
-    assert "show" in seen, "Click must forward show through IPC"
-    assert set(seen) <= {"snapshot", "show"}, "Status must not trigger application actions"
+    assert {"show", "preferences", "language-next"} <= set(seen), "Clicks must dispatch the expected commands"
+    assert set(seen) <= {"snapshot", "show", "preferences", "language-next"}, "No unexpected actions"
     process.stdin.close()
     process.wait(timeout=3)
     assert process.returncode == 0, process.stderr.read()
-    print("PASS: colored icons, recording pulse, transcription spinner, idle/reduced-motion quiet, click IPC, EOF shutdown")
+    print("PASS: colored icons, recording pulse, transcription spinner, idle/reduced-motion quiet, language label, left/right/middle click IPC, EOF shutdown")
 finally:
     if process.poll() is None:
         process.terminate()

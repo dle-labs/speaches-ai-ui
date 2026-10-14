@@ -1,11 +1,11 @@
-use crate::{audio, controller::Controller, settings::Settings};
+use crate::{audio, controller::Controller, language, settings::Settings};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IndexPath,
+    ActiveTheme, Disableable, IndexPath, Selectable, Sizable,
     button::Button,
     checkbox::Checkbox,
     input::{Input, InputState, Textarea, TextareaState},
     progress::Progress,
-    select::{Select, SelectState},
+    select::{SearchableVec, Select, SelectState},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -58,7 +58,14 @@ struct DictationView {
     language: Entity<InputState>,
     shortcut: Entity<InputState>,
     cancel_shortcut: Entity<InputState>,
-    model: Entity<SelectState<Vec<String>>>,
+    language_shortcut: Entity<InputState>,
+    quick_languages: Entity<InputState>,
+    validation_error: Option<String>,
+    last_language: String,
+    last_model: String,
+    language_revision: u64,
+    model_selection_revision: u64,
+    model: Entity<SelectState<SearchableVec<String>>>,
     device: Entity<SelectState<Vec<String>>>,
     transcript: Entity<TextareaState>,
     known_models_revision: u64,
@@ -72,6 +79,8 @@ impl DictationView {
     fn new(controller: Entity<Controller>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = controller.read(cx).settings.clone();
         let known_models_revision = controller.read(cx).models_revision;
+        let language_revision = controller.read(cx).language_revision;
+        let model_selection_revision = controller.read(cx).model_selection_revision;
         let mut models = controller.read(cx).models.clone();
         if !models.contains(&settings.model) {
             models.insert(0, settings.model.clone());
@@ -80,8 +89,9 @@ impl DictationView {
             .iter()
             .position(|m| m == &settings.model)
             .map(IndexPath::new);
-        let model =
-            cx.new(|cx| SelectState::new(models.clone(), chosen, window, cx).searchable(true));
+        let model = cx.new(|cx| {
+            SelectState::new(SearchableVec::new(models), chosen, window, cx).searchable(true)
+        });
         let mut devices = vec!["System default".to_owned()];
         devices.extend(audio::devices().unwrap_or_default());
         let chosen = devices
@@ -94,8 +104,19 @@ impl DictationView {
         let transcript = cx.new(|cx| TextareaState::new(window, cx).default_value(text.clone()));
         let _subscription = cx.observe_in(&controller, window, |this, _, window, cx| {
             let c = this.controller.read(cx);
-            let models = c.models.clone();
+            let language = c.settings.language.clone();
+            let model = c.settings.model.clone();
+            let language_revision = c.language_revision;
+            let model_selection_revision = c.model_selection_revision;
             let models_revision = c.models_revision;
+            let mut models = if models_revision != this.known_models_revision
+                || model != this.last_model
+                || model_selection_revision != this.model_selection_revision
+            {
+                c.models.clone()
+            } else {
+                Vec::new()
+            };
             let text = c.transcript.clone();
             if this
                 .retry_confirm
@@ -108,14 +129,38 @@ impl DictationView {
             {
                 this.retry_confirm = None;
             }
-            if models_revision != this.known_models_revision {
+            // Sync only externally changed selections, never unrelated unsaved fields.
+            if language != this.last_language || language_revision != this.language_revision {
+                this.language_revision = language_revision;
+                this.last_language = language.clone();
+                this.options.language = language.clone();
+                this.language
+                    .update(cx, |state, cx| state.set_value(language, window, cx));
+            }
+            let model_changed = model != this.last_model
+                || model_selection_revision != this.model_selection_revision;
+            this.model_selection_revision = model_selection_revision;
+            if models_revision != this.known_models_revision || model_changed {
                 this.known_models_revision = models_revision;
-                let selected = this.model.read(cx).selected_value().cloned();
+                let draft = this.model.read(cx).selected_value().cloned();
+                for value in draft.iter().chain(std::iter::once(&model)) {
+                    if !models.contains(value) {
+                        models.push(value.clone());
+                    }
+                }
+                let selected = if model_changed {
+                    Some(model.clone())
+                } else {
+                    draft
+                };
+                this.last_model = model.clone();
+                this.options.model = model;
                 this.model.update(cx, |state, cx| {
-                    state.set_items(models, window, cx);
+                    state.set_items(SearchableVec::new(models), window, cx);
                     if let Some(value) = selected {
                         state.set_selected_value(&value, window, cx);
                     }
+                    cx.notify();
                 });
             }
             if text != this.last_transcript {
@@ -150,6 +195,18 @@ impl DictationView {
                     .default_value(settings.cancel_shortcut.clone())
                     .placeholder("Ctrl+Shift+X")
             }),
+            language_shortcut: cx.new(|cx| {
+                InputState::new(window, cx).default_value(settings.language_shortcut.clone())
+            }),
+            quick_languages: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(language::quick_languages_text(&settings.quick_languages))
+            }),
+            validation_error: None,
+            last_language: settings.language.clone(),
+            last_model: settings.model.clone(),
+            language_revision,
+            model_selection_revision,
             model,
             device,
             transcript,
@@ -161,11 +218,14 @@ impl DictationView {
             _subscription,
         }
     }
-    fn draft(&self, cx: &App) -> Settings {
+    fn draft(&self, cx: &App) -> anyhow::Result<Settings> {
         let mut settings = self.options.clone();
         settings.base_url = self.url.read(cx).value().to_string();
         settings.api_key = self.key.read(cx).unmask_value().to_string();
         settings.language = self.language.read(cx).value().to_string();
+        settings.quick_languages =
+            language::parse_quick_languages(&self.quick_languages.read(cx).value())?;
+        settings.language_shortcut = self.language_shortcut.read(cx).value().to_string();
         settings.toggle_shortcut = self.shortcut.read(cx).value().to_string();
         settings.cancel_shortcut = self.cancel_shortcut.read(cx).value().to_string();
         settings.model = self
@@ -185,10 +245,21 @@ impl DictationView {
         } else {
             device
         };
-        settings
+        Ok(settings)
     }
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let draft = self.draft(cx);
+        let draft = match self.draft(cx) {
+            Ok(draft) => {
+                self.validation_error = None;
+                draft
+            }
+            Err(error) => {
+                self.validation_error = Some(error.to_string());
+                self.retry_confirm = None;
+                cx.notify();
+                return false;
+            }
+        };
         if !self
             .controller
             .update(cx, |c, cx| c.save_settings(draft, cx))
@@ -197,11 +268,24 @@ impl DictationView {
             return false;
         }
         self.options = self.controller.read(cx).settings.clone();
+        self.language.update(cx, |input, cx| {
+            input.set_value(self.options.language.clone(), window, cx)
+        });
         self.shortcut.update(cx, |input, cx| {
             input.set_value(self.options.toggle_shortcut.clone(), window, cx)
         });
         self.cancel_shortcut.update(cx, |input, cx| {
             input.set_value(self.options.cancel_shortcut.clone(), window, cx)
+        });
+        self.language_shortcut.update(cx, |input, cx| {
+            input.set_value(self.options.language_shortcut.clone(), window, cx)
+        });
+        self.quick_languages.update(cx, |input, cx| {
+            input.set_value(
+                language::quick_languages_text(&self.options.quick_languages),
+                window,
+                cx,
+            )
         });
         true
     }
@@ -232,6 +316,9 @@ impl Render for DictationView {
         let level = c.level;
         let empty = c.transcript.is_empty();
         let controller = self.controller.clone();
+        let quick_languages = c.settings.quick_languages.clone();
+        let current_language = c.settings.language.clone();
+        let selection_error = c.selection_error.clone();
         div().id("dictation-window").key_context("Speaches")
             .track_focus(&self.focus).on_action(cx.listener(Self::close_or_quit))
             .size_full().overflow_y_scroll().p_5().flex().flex_col().gap_3()
@@ -245,16 +332,30 @@ impl Render for DictationView {
                 .child(Button::new("cancel").label("Cancel / discard").disabled(!recording && !busy && !held)
                     .on_click(cx.listener(|this, _, _, cx| { this.controller.update(cx, |c, cx| c.cancel(cx)); this.retry_confirm = None; })))
                 .child(status))
+            .child(div().flex().flex_wrap().items_center().gap_2()
+                .child(format!("Language: {}", language::short_label(&current_language)))
+                .children(quick_languages.into_iter().map(|code| {
+                    let selected = code == current_language;
+                    Button::new(SharedString::from(format!("quick-language-{code}")))
+                        .small().label(language::short_label(&code))
+                        .tooltip(language::name(&code).to_owned()).selected(selected)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.controller.update(cx, |c, cx| { c.select_language(&code, cx); });
+                        }))
+                })))
+            .child(div().text_sm().text_color(cx.theme().muted_foreground)
+                .child("Quick choices apply to the next recording. Model language support varies."))
+            .when_some(selection_error, |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))
             .child(Progress::new("microphone-level").value(level * 100.0))
             .child(div().text_sm().child(shortcut))
             .child(div().text_sm().child(notice))
             .when(held && !busy, |el| el.child(
                 div().flex().flex_col().gap_2()
-                    .child(self.retry_confirm.as_ref().map(|(_, s)| format!("Upload retained audio to {} using {}? No automatic outputs.", s.base_url, s.model)).unwrap_or_else(|| "Review the destination before uploading retained audio.".into()))
+                    .child(self.retry_confirm.as_ref().map(|(_, s)| format!("Upload retained audio to {} using {} · {}? No automatic outputs.", s.base_url, s.model, language::name(&s.language))).unwrap_or_else(|| "Review the destination before uploading retained audio.".into()))
                     .child(Button::new("retry").label(if self.retry_confirm.is_some() { "Confirm upload" } else { "Review retry…" })
                         .on_click(cx.listener(|this, _, window, cx| {
                             if let Some((revision, snapshot)) = this.retry_confirm.take() {
-                                if this.draft(cx) == snapshot {
+                                if this.draft(cx).is_ok_and(|draft| draft == snapshot) {
                                     this.controller.update(cx, |c, cx| c.confirm_retry(revision, &snapshot, cx));
                                 } else {
                                     if !this.apply(window, cx) { return; }
@@ -282,6 +383,10 @@ impl Render for DictationView {
             .child(Select::new(&self.model).placeholder("Check connection to discover models"))
             .child("Language")
             .child(Input::new(&self.language))
+            .child("Quick languages (comma-separated)")
+            .child(Input::new(&self.quick_languages))
+            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Example: auto, en, de. Button order is also the language-cycle order."))
+            .when_some(self.validation_error.clone(), |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))
             .child("Microphone")
             .child(Select::new(&self.device))
             .child(div().text_lg().child("Keyboard shortcuts"))
@@ -289,6 +394,8 @@ impl Render for DictationView {
             .child(Input::new(&self.shortcut))
             .child("Cancel / discard (system-wide)")
             .child(Input::new(&self.cancel_shortcut))
+            .child("Cycle quick languages (system-wide)")
+            .child(Input::new(&self.language_shortcut))
             .child(div().text_sm().text_color(cx.theme().muted_foreground)
                 .child("Choose different combinations, then Save settings. Cancel stops recording/transcription and discards temporary audio. Examples: Ctrl+Alt+Space, Super+Shift+R, Ctrl+F9. Ctrl+Q is reserved for hide/quit; Ctrl+V and Ctrl+Shift+V for paste."))
             .when_some(shortcut_error, |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))

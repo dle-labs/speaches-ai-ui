@@ -28,22 +28,51 @@ pub(crate) enum Status {
     Offline,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct BarSnapshot {
     pub(crate) state: Status,
     pub(crate) animate: bool,
+    #[serde(default)]
+    pub(crate) language: String,
+    #[serde(default)]
+    pub(crate) next_language: Option<String>,
 }
 impl BarSnapshot {
     pub(crate) fn offline() -> Self {
         Self {
             state: Status::Offline,
             animate: false,
+            language: String::new(),
+            next_language: None,
         }
     }
-    pub(crate) fn markup(self, frame: usize) -> String {
-        self.state.bar_frame(frame, self.animate)
+    pub(crate) fn with_languages(
+        state: Status,
+        animate: bool,
+        selected: &str,
+        active: Option<&str>,
+    ) -> Self {
+        Self {
+            state,
+            animate,
+            language: active.unwrap_or(selected).to_owned(),
+            next_language: active
+                .filter(|current| *current != selected)
+                .map(|_| selected.to_owned()),
+        }
     }
-    pub(crate) fn is_animating(self) -> bool {
+    pub(crate) fn markup(&self, frame: usize) -> String {
+        let icon = self.state.bar_frame(frame, self.animate);
+        if self.state == Status::Offline {
+            return icon;
+        }
+        let label = crate::language::short_label(&self.language);
+        match &self.next_language {
+            Some(next) => format!("{icon} {label} → {}", crate::language::short_label(next)),
+            None => format!("{icon} {label}"),
+        }
+    }
+    pub(crate) fn is_animating(&self) -> bool {
         self.animate && matches!(self.state, Status::Recording(_) | Status::Transcribing)
     }
 }
@@ -160,10 +189,27 @@ mod tests {
         );
     }
     #[test]
+    fn language_is_visible_and_in_flight_changes_are_explicit() {
+        let ready = BarSnapshot::with_languages(Status::Ready, false, "de", None);
+        assert!(ready.markup(0).ends_with(" DE"));
+        let active = BarSnapshot::with_languages(Status::Transcribing, false, "de", Some("en"));
+        assert!(active.markup(0).ends_with(" EN → DE"));
+        let auto = BarSnapshot::with_languages(Status::Ready, false, "", None);
+        assert!(auto.markup(0).ends_with(" Auto"));
+    }
+    #[test]
+    fn language_markup_cannot_inject_user_text() {
+        let snapshot = BarSnapshot::with_languages(Status::Ready, false, "<b>bad</b>", None);
+        assert!(snapshot.markup(0).ends_with(" ?"));
+        assert!(!snapshot.markup(0).contains("<b>"));
+    }
+    #[test]
     fn bar_snapshot_round_trips_without_content_or_credentials() {
         let snapshot = BarSnapshot {
             state: Status::Recording(17),
             animate: true,
+            language: "en".into(),
+            next_language: None,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let decoded: BarSnapshot = serde_json::from_str(&json).unwrap();

@@ -18,6 +18,8 @@ const CLICK_LIMIT: u64 = 4096;
 
 enum Event {
     Show,
+    Preferences,
+    NextLanguage,
     Closed,
 }
 #[derive(Deserialize)]
@@ -25,12 +27,17 @@ struct Click {
     button: u8,
 }
 
-fn is_left_click(line: &str) -> bool {
-    serde_json::from_str::<Click>(line).is_ok_and(|click| click.button == 1)
+fn click_event(line: &str) -> Option<Event> {
+    match serde_json::from_str::<Click>(line).ok()?.button {
+        1 => Some(Event::Show),
+        2 => Some(Event::NextLanguage),
+        3 => Some(Event::Preferences),
+        _ => None,
+    }
 }
 
-fn show_app() {
-    if ipc::request("show").is_ok() {
+fn open_app(command: &str) {
+    if ipc::request(command).is_ok() {
         return;
     }
     // Only an explicit click can launch the app. Normal status polling never does.
@@ -41,7 +48,7 @@ fn show_app() {
     // restart must not terminate a dictation started from this click.
     if let Ok(mut child) = Command::new(executable)
         .process_group(0)
-        .arg("show")
+        .arg(command)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -64,9 +71,9 @@ pub(crate) fn watch() -> Result<()> {
                 Ok(0) | Err(_) => break,
                 Ok(_) if !line.ends_with('\n') => break,
                 Ok(_) => {
-                    if is_left_click(&line) && sender.try_send(Event::Show).is_err() {
+                    if let Some(event) = click_event(&line) {
                         // Click bursts can coalesce; they must not allocate unbounded work.
-                        continue;
+                        let _ = sender.try_send(event);
                     }
                 }
             }
@@ -105,7 +112,11 @@ pub(crate) fn watch() -> Result<()> {
         let deadline = Instant::now() + interval;
         loop {
             match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(Event::Show) => show_app(),
+                Ok(Event::Show) => open_app("show"),
+                Ok(Event::Preferences) => open_app("preferences"),
+                Ok(Event::NextLanguage) => {
+                    let _ = ipc::request("language-next");
+                }
                 Ok(Event::Closed) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 Err(RecvTimeoutError::Timeout) => break,
             }
@@ -121,11 +132,20 @@ mod tests {
     use super::*;
     #[test]
     fn click_protocol_accepts_left_click_and_ignores_extra_properties() {
-        assert!(is_left_click(
-            r#"{"button":1,"x":123,"":"", "full_text":"ignored"}"#
+        assert!(matches!(
+            click_event(r#"{"button":1,"x":123,"":"", "full_text":"ignored"}"#),
+            Some(Event::Show)
         ));
-        assert!(!is_left_click(r#"{"button":3}"#));
-        assert!(!is_left_click("not json"));
-        assert!(!is_left_click(r#"{"button":"1"}"#));
+        assert!(matches!(
+            click_event(r#"{"button":2}"#),
+            Some(Event::NextLanguage)
+        ));
+        assert!(matches!(
+            click_event(r#"{"button":3}"#),
+            Some(Event::Preferences)
+        ));
+        assert!(click_event(r#"{"button":4}"#).is_none());
+        assert!(click_event("not json").is_none());
+        assert!(click_event(r#"{"button":"1"}"#).is_none());
     }
 }

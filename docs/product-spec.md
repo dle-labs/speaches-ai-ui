@@ -22,7 +22,9 @@ A keyboard-first Linux dictation utility that records speech, sends it to a user
 5. On success, independently perform enabled completion actions: chime, copy, paste.
 6. Show a brief completion indication, then return to ready.
 
-A second configurable system-wide shortcut, **Ctrl+Shift+X** by default, cancels capture/transcription or discards retained temporary audio without showing/focusing the app. It also suppresses pending automatic paste but cannot undo output already delivered. Both shortcuts must be distinct; rebinds are transactional and cancel wins over queued toggles.
+A second configurable system-wide shortcut, **Ctrl+Shift+X** by default, cancels capture/transcription or discards retained temporary audio without showing/focusing the app. It also suppresses pending automatic paste but cannot undo output already delivered. All configured shortcuts must be distinct; rebinds are transactional and cancel wins over queued toggles.
+
+Quick language buttons, a bar right-click model/language preferences panel, and a configurable language-cycle shortcut share one saved selection. Default cycling is Auto → English → German with Ctrl+Alt+Shift+L; the quick list and shortcut are configurable. Switching applies to the next recording, not an already active request. The bar shows the active language and a next-language indication when needed.
 
 Only one active recording/transcription job is supported. A toggle during transcription does not start a queue or cancel the request; it reports busy without stealing focus. Ignore keyboard auto-repeat.
 
@@ -53,7 +55,7 @@ This is a best-effort window-level guard: it cannot detect changing text fields 
 - Window close button hides by default; it is independent of the Ctrl+Q setting.
 - Explicit **Quit application** always exits, stopping capture and cancelling local work; it must not silently become hide.
 - Hiding never cancels recording/transcription.
-- Reopening the application or clicking its bar block shows the existing window, not a second instance.
+- Reopening the application or left-clicking its bar block shows the existing full window, not a second instance. Right-clicking opens only the compact preferences panel.
 - Proposed conveniences: configurable start hidden and launch at login, both off by default.
 - Ctrl+Q is an application-window command, not a global keyboard grab.
 
@@ -71,14 +73,15 @@ Ship an opt-in i3xrocks block and setup instructions, not a tray-dependent desig
 | Error | ERR | Recoverable failure requires attention |
 | App absent | OFF | Main process is not running |
 
-Use small distinct state icons (microphone, record circle, processing spinner, check, pause, warning, power), not color alone. Keep elapsed recording time visible and provide a plain-text status alternative. Keep detailed error text in the application, not the bar. Clicking shows the window; it does not start recording. Bar integration must not contact the backend, expose transcripts, or continuously auto-launch the main process.
+Use small distinct state icons (microphone, record circle, processing spinner, check, pause, warning, power), not color alone. Keep elapsed recording time visible and provide a plain-text status alternative. Keep detailed error text in the application, not the bar. Left-click shows the full window, right-click opens compact model/language preferences, and middle-click cycles quick languages. None starts recording. Bar integration must not contact the backend, expose transcripts, or continuously auto-launch the main process.
 
 One application binary may have lightweight status/show client subcommands. This does not require a separately installed audio service or input-injection daemon. Do not overwrite existing user bar configuration.
 
 ## Settings
 
 ### General
-- Configurable global recording toggle and cancel/discard shortcuts; detect conflicts and retain both previous working bindings on failure.
+- Configurable global recording toggle, cancel/discard, and language-cycle shortcuts; detect conflicts and retain all previous working bindings on failure.
+- Ordered quick-language list, shared by the main buttons, middle-click, and keyboard cycle. The compact preferences panel offers searchable language/model choices.
 - Start hidden, launch at login, Ctrl+Q quits.
 
 ### Audio

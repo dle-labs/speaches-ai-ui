@@ -3,6 +3,8 @@ mod backend;
 mod bar;
 mod controller;
 mod ipc;
+mod language;
+mod quick_preferences;
 mod settings;
 mod status;
 mod ui;
@@ -14,23 +16,33 @@ use std::{sync::Arc, time::Duration};
 
 fn main() -> Result<()> {
     let command = std::env::args().nth(1).unwrap_or_else(|| "show".into());
+    if matches!(command.as_str(), "language" | "model") {
+        let value = std::env::args()
+            .nth(2)
+            .ok_or_else(|| anyhow::anyhow!("Supply a {} value", command))?;
+        anyhow::ensure!(std::env::args().count() == 3, "Supply one quoted value");
+        return ipc::run_client(&format!("{command} {value}"));
+    }
     if command == "bar-watch" {
         return bar::watch();
     }
     if matches!(
         command.as_str(),
-        "status" | "bar" | "toggle" | "cancel" | "quit"
+        "status" | "bar" | "selection" | "language-next" | "toggle" | "cancel" | "quit"
     ) {
         return ipc::run_client(&command);
     }
     if matches!(command.as_str(), "--help" | "-h") {
         println!(
-            "Speaches AI\n\n  speaches-ai [show]   Open or reveal the window\n  speaches-ai status   Print plain-text status (does not launch app)\n  speaches-ai bar      Print static colored icon (Pango)\n  speaches-ai bar-watch Stream animated icons and handle i3xrocks clicks\n  speaches-ai toggle   Start/stop recording in the running app\n  speaches-ai cancel   Cancel and discard temporary recording\n  speaches-ai quit     Exit the running app\n\nGlobal shortcuts: configurable in the window. Ctrl+Alt+Space toggles recording; Ctrl+Shift+X cancels/discards by default. Ctrl+Q hides the window by default."
+            "Speaches AI\n\n  speaches-ai [show]   Open or reveal the window\n  speaches-ai preferences Open compact model/language preferences\n  speaches-ai language-next Cycle quick languages without showing a window\n  speaches-ai language CODE Select language (or auto)\n  speaches-ai model ID Select a discovered model\n  speaches-ai selection Print selected preferences as JSON\n  speaches-ai status   Print plain-text status (does not launch app)\n  speaches-ai bar      Print static colored icon (Pango)\n  speaches-ai bar-watch Stream animated icons and handle i3xrocks clicks\n  speaches-ai toggle   Start/stop recording in the running app\n  speaches-ai cancel   Cancel and discard temporary recording\n  speaches-ai quit     Exit the running app\n\nGlobal shortcuts: configurable in the window. Ctrl+Alt+Space toggles recording; Ctrl+Shift+X cancels/discards; Ctrl+Alt+Shift+L cycles languages by default. Ctrl+Q hides the window by default."
         );
         return Ok(());
     }
-    anyhow::ensure!(command == "show", "Unknown command; use --help");
-    match ipc::request("show") {
+    anyhow::ensure!(
+        matches!(command.as_str(), "show" | "preferences"),
+        "Unknown command; use --help"
+    );
+    match ipc::request(&command) {
         Ok(_) => return Ok(()),
         Err(error)
             if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
@@ -54,10 +66,15 @@ fn main() -> Result<()> {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            quick_preferences::init(cx);
             cx.set_app_identity("speaches-ai", "Speaches AI");
             cx.bind_keys([KeyBinding::new("ctrl-q", ui::CloseOrQuit, Some("Speaches"))]);
             let controller = cx.new(|_| controller::Controller::new(runtime));
-            ui::show(controller.clone(), cx);
+            if command == "preferences" {
+                quick_preferences::show(controller.clone(), cx);
+            } else {
+                ui::show(controller.clone(), cx);
+            }
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
@@ -67,6 +84,14 @@ fn main() -> Result<()> {
                         while let Ok(command) = server.commands.try_recv() {
                             match command.as_str() {
                                 "show" => ui::show(controller.clone(), cx),
+                                "preferences" => quick_preferences::show(controller.clone(), cx),
+                                "language-next" => { controller.update(cx, |c, cx| c.cycle_language(cx)); }
+                                command if command.starts_with("language ") => {
+                                    controller.update(cx, |c, cx| c.select_language(&command[9..], cx));
+                                }
+                                command if command.starts_with("model ") => {
+                                    controller.update(cx, |c, cx| c.select_model(&command[6..], cx));
+                                }
                                 "toggle" => {
                                     controller.update(cx, |c, cx| c.toggle(true, cx));
                                 }
@@ -82,11 +107,13 @@ fn main() -> Result<()> {
                         }
                         controller.update(cx, |c, cx| {
                             c.tick(cx);
+                            if let Ok(mut selection) = server.selection.lock() {
+                                *selection = serde_json::json!({"language": c.settings.language,
+                                    "model": c.settings.model, "quick_languages": c.settings.quick_languages,
+                                    "error": c.selection_error});
+                            }
                             if let Ok(mut status) = server.status.lock() {
-                                *status = status::BarSnapshot {
-                                    state: c.state(),
-                                    animate: c.settings.animate_bar,
-                                };
+                                *status = c.bar_snapshot();
                             }
                         });
                     });
