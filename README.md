@@ -2,6 +2,42 @@
 
 An early native GPUI-kit dictation prototype for Ubuntu 24.04 / Regolith 3.4 / X11.
 It connects to an existing Speaches backend; no local model engine or Docker service is installed.
+The UI has only been tested on Linux/X11 so far and must be built and installed separately from the backend.
+
+## Speaches backend setup
+
+[Speaches](https://speaches.ai/) is an open-source, self-hosted server for speech-to-text, translation, and text-to-speech with an OpenAI-compatible API. The UI uses its speech-to-text API.
+
+To launch a GPU-enabled backend, install Docker and the NVIDIA Container Toolkit on the backend host, then run:
+
+```sh
+docker run \
+  --rm \
+  --detach \
+  --publish 8000:8000 \
+  --name speaches \
+  --volume hf-hub-cache:/home/ubuntu/.cache/huggingface/hub \
+  --gpus=all \
+  ghcr.io/speaches-ai/speaches:latest-cuda
+```
+
+This CUDA configuration requires an NVIDIA graphics card. The current setup uses a fairly old **GTX 1070 Ti**. Speaches also supports CPU configurations; the NVIDIA requirement applies to this Docker configuration, not every Speaches deployment. See the [Speaches installation documentation](https://speaches.ai/installation/) for alternatives and prerequisites.
+
+The named volume caches downloaded models between container runs. The command publishes port 8000 on the backend host; protect access with appropriate network restrictions, especially if that host is reachable from an untrusted network.
+
+For a backend running on the same machine as the UI, set the backend URL in the UI to **http://localhost:8000**. The current development setup instead uses **http://localhost:9791**, forwarded over SSH to the backend host's port 8000. For example:
+
+```sh
+ssh -N -L 9791:localhost:8000 user@backend-host
+```
+
+Replace `user@backend-host` with your backend host's SSH login and keep the tunnel running while using the UI. Docker runs only the backend; build and install the desktop UI separately using the instructions below.
+
+### Recommended speech-to-text model for this setup
+
+**`deepdml/faster-whisper-large-v3-turbo-ct2`** is the currently recommended model for this setup and the model used with the GTX 1070 Ti. It is also the UI's default model. This is a recommendation for this particular setup, not a universal hardware compatibility guarantee.
+
+Use **Save and check connection** to discover available speech-to-text models, then select this model and save your settings. Model listing alone does not prove inference readiness; confirm the setup with a short recording and transcription.
 
 ## Run
 
