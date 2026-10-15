@@ -1,16 +1,40 @@
-use crate::{audio, controller::Controller, language, settings::Settings};
+use crate::{
+    audio,
+    controller::Controller,
+    language,
+    settings::{Settings, ThemePreference},
+    status::Status,
+};
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, Selectable, Sizable,
-    button::Button,
+    button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::{Input, InputState, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::DropdownMenu,
     progress::Progress,
-    select::{SearchableVec, Select, SelectState},
+    radio::RadioGroup,
+    select::{SearchableVec, Select, SelectEvent, SelectState},
+    tab::{Tab, TabBar},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-actions!(speaches, [CloseOrQuit]);
+actions!(
+    speaches,
+    [
+        CloseOrQuit,
+        QuitApplication,
+        OpenSettings,
+        ShowDictation,
+        SaveSettings
+    ]
+);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceTab {
+    Dictation,
+    Settings,
+}
 
 pub(crate) fn show(controller: Entity<Controller>, cx: &mut App) {
     if let Some(handle) = controller.read(cx).window
@@ -25,13 +49,15 @@ pub(crate) fn show(controller: Entity<Controller>, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(660.), px(820.)),
+            size(px(760.), px(760.)),
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
             title: Some("Speaches AI".into()),
             ..Default::default()
         }),
+        // Native minimum bounds are physical window-system constraints.
+        window_min_size: Some(size(px(540.), px(540.))),
         app_id: Some("speaches-ai".into()),
         ..Default::default()
     };
@@ -73,7 +99,11 @@ struct DictationView {
     options: Settings,
     retry_confirm: Option<(u64, Settings)>,
     focus: FocusHandle,
-    _subscription: Subscription,
+    tab: WorkspaceTab,
+    form_feedback: Option<String>,
+    form_error: bool,
+    copied: bool,
+    _subscriptions: Vec<Subscription>,
 }
 impl DictationView {
     fn new(controller: Entity<Controller>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -164,6 +194,7 @@ impl DictationView {
                 });
             }
             if text != this.last_transcript {
+                this.copied = false;
                 this.last_transcript = text.clone();
                 this.transcript
                     .update(cx, |state, cx| state.set_value(text, window, cx));
@@ -172,7 +203,7 @@ impl DictationView {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self {
+        let mut view = Self {
             controller,
             url: cx.new(|cx| InputState::new(window, cx).default_value(settings.base_url.clone())),
             key: cx.new(|cx| {
@@ -215,11 +246,47 @@ impl DictationView {
             options: settings,
             retry_confirm: None,
             focus,
-            _subscription,
+            tab: WorkspaceTab::Dictation,
+            form_feedback: None,
+            form_error: false,
+            copied: false,
+            _subscriptions: vec![_subscription],
+        };
+        // Draft edits rerender the save bar without mutating the saved settings.
+        for input in [
+            &view.url,
+            &view.key,
+            &view.language,
+            &view.shortcut,
+            &view.cancel_shortcut,
+            &view.language_shortcut,
+            &view.quick_languages,
+        ] {
+            view._subscriptions
+                .push(cx.subscribe(input, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.draft_changed(cx);
+                    }
+                }));
         }
+        view._subscriptions
+            .push(cx.subscribe(&view.model, |this, _, event, cx| {
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    this.draft_changed(cx);
+                }
+            }));
+        view._subscriptions
+            .push(cx.subscribe(&view.device, |this, _, event, cx| {
+                if matches!(event, SelectEvent::Confirm(_)) {
+                    this.draft_changed(cx);
+                }
+            }));
+        view
     }
     fn draft(&self, cx: &App) -> anyhow::Result<Settings> {
         let mut settings = self.options.clone();
+        // Appearance saves immediately and must never be overwritten by a stale form.
+        settings.theme = self.controller.read(cx).settings.theme;
         settings.base_url = self.url.read(cx).value().to_string();
         settings.api_key = self.key.read(cx).unmask_value().to_string();
         settings.language = self.language.read(cx).value().to_string();
@@ -255,6 +322,8 @@ impl DictationView {
             }
             Err(error) => {
                 self.validation_error = Some(error.to_string());
+                self.form_feedback = Some(error.to_string());
+                self.form_error = true;
                 self.retry_confirm = None;
                 cx.notify();
                 return false;
@@ -265,8 +334,17 @@ impl DictationView {
             .update(cx, |c, cx| c.save_settings(draft, cx))
         {
             self.retry_confirm = None;
+            self.form_feedback = Some(self.controller.read(cx).notice.clone());
+            self.form_error = true;
+            cx.notify();
             return false;
         }
+        self.form_feedback = Some(self.controller.read(cx).notice.clone());
+        self.form_error = self
+            .controller
+            .read(cx)
+            .notice
+            .contains("could not be saved");
         self.options = self.controller.read(cx).settings.clone();
         self.language.update(cx, |input, cx| {
             input.set_value(self.options.language.clone(), window, cx)
@@ -287,6 +365,7 @@ impl DictationView {
                 cx,
             )
         });
+        cx.notify();
         true
     }
     fn close_or_quit(&mut self, _: &CloseOrQuit, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,125 +380,529 @@ impl DictationView {
         window.remove_window();
     }
 }
-impl Render for DictationView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl DictationView {
+    fn change_tab(&mut self, tab: WorkspaceTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = tab;
+        // The old field may no longer be mounted. Keep command handling in the visible view.
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        // Programmatic normalization after Save also emits input changes. Do not
+        // erase a persistence warning when those events reflect the applied form.
+        if !self.form_error || self.is_dirty(cx) {
+            self.form_feedback = None;
+            self.form_error = false;
+        }
+        self.validation_error = None;
+        cx.notify();
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.draft(cx)
+            .map_or(true, |draft| draft != self.controller.read(cx).settings)
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dirty = self.is_dirty(cx);
+        div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .px_5()
+            .py_3()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Speaches AI"),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    TabBar::new("workspace-tabs")
+                        .outline()
+                        .small()
+                        .selected_index(if self.tab == WorkspaceTab::Dictation {
+                            0
+                        } else {
+                            1
+                        })
+                        .child(Tab::new().label("Dictation").aria_label("Dictation"))
+                        .child(
+                            Tab::new()
+                                .label(if dirty {
+                                    "Settings · unsaved"
+                                } else {
+                                    "Settings"
+                                })
+                                .aria_label("Settings"),
+                        )
+                        .on_click(cx.listener(|this, ix, window, cx| {
+                            this.change_tab(
+                                if *ix == 0 {
+                                    WorkspaceTab::Dictation
+                                } else {
+                                    WorkspaceTab::Settings
+                                },
+                                window,
+                                cx,
+                            );
+                        })),
+                ),
+            )
+            .child(
+                Button::new("application-menu")
+                    .ghost()
+                    .small()
+                    .label("Menu")
+                    .dropdown_menu(|menu, _, _| {
+                        menu.menu("Quit application", Box::new(QuitApplication))
+                    }),
+            )
+    }
+
+    fn render_dictation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let c = self.controller.read(cx);
         let recording = c.recording.is_some();
         let busy = c.busy;
         let held = c.held_audio.is_some();
-        let checking = c.checking;
-        let status = c.status();
-        let notice = c.notice.clone();
-        let connection = c.connection.clone();
-        let shortcut = c.shortcut.clone();
-        let shortcut_error = c.shortcut_error.clone();
+        let state = c.state();
+        let status = match state {
+            Status::Recording(seconds) => {
+                format!("Recording · {:02}:{:02}", seconds / 60, seconds % 60)
+            }
+            Status::Transcribing => "Transcribing".into(),
+            Status::Finished => "Transcript ready".into(),
+            Status::PasteSkipped => "Paste skipped".into(),
+            Status::Error if held => "Audio retained".into(),
+            Status::Error => "Needs attention".into(),
+            _ => "Ready".into(),
+        };
+        let status_color = if recording || matches!(state, Status::Error) {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
         let level = c.level;
-        let empty = c.transcript.is_empty();
-        let controller = self.controller.clone();
-        let quick_languages = c.settings.quick_languages.clone();
         let current_language = c.settings.language.clone();
+        let choices = c.settings.quick_languages.clone();
         let selection_error = c.selection_error.clone();
-        div().id("dictation-window").key_context("Speaches")
-            .track_focus(&self.focus).on_action(cx.listener(Self::close_or_quit))
-            .size_full().overflow_y_scroll().p_5().flex().flex_col().gap_3()
-            .bg(cx.theme().background).text_color(cx.theme().foreground)
-            .child(div().text_xl().child("Speaches AI"))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("DICTATION PROTOTYPE · X11"))
-            .child(div().flex().items_center().gap_3()
-                .child(Button::new("record").label(if recording { "Stop and transcribe" } else { "Start recording" })
-                    .disabled(busy || held)
-                    .on_click(cx.listener(|this, _, _, cx| { this.controller.update(cx, |c, cx| c.toggle(false, cx)); })))
-                .child(Button::new("cancel").label("Cancel / discard").disabled(!recording && !busy && !held)
-                    .on_click(cx.listener(|this, _, _, cx| { this.controller.update(cx, |c, cx| c.cancel(cx)); this.retry_confirm = None; })))
-                .child(status))
-            .child(div().flex().flex_wrap().items_center().gap_2()
-                .child(format!("Language: {}", language::short_label(&current_language)))
-                .children(quick_languages.into_iter().map(|code| {
-                    let selected = code == current_language;
-                    Button::new(SharedString::from(format!("quick-language-{code}")))
-                        .small().label(language::short_label(&code))
-                        .tooltip(language::name(&code).to_owned()).selected(selected)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.controller.update(cx, |c, cx| { c.select_language(&code, cx); });
-                        }))
-                })))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground)
-                .child("Quick choices apply to the next recording. Model language support varies."))
-            .when_some(selection_error, |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))
-            .child(Progress::new("microphone-level").value(level * 100.0))
-            .child(div().text_sm().child(shortcut))
-            .child(div().text_sm().child(notice))
-            .when(held && !busy, |el| el.child(
-                div().flex().flex_col().gap_2()
-                    .child(self.retry_confirm.as_ref().map(|(_, s)| format!("Upload retained audio to {} using {} · {}? No automatic outputs.", s.base_url, s.model, language::name(&s.language))).unwrap_or_else(|| "Review the destination before uploading retained audio.".into()))
-                    .child(Button::new("retry").label(if self.retry_confirm.is_some() { "Confirm upload" } else { "Review retry…" })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some((revision, snapshot)) = this.retry_confirm.take() {
-                                if this.draft(cx).is_ok_and(|draft| draft == snapshot) {
-                                    this.controller.update(cx, |c, cx| c.confirm_retry(revision, &snapshot, cx));
-                                } else {
-                                    if !this.apply(window, cx) { return; }
-                                    let c = this.controller.read(cx);
-                                    this.retry_confirm = Some((c.held_revision, c.settings.clone()));
-                                }
-                            } else {
-                                if !this.apply(window, cx) { return; }
-                                let c = this.controller.read(cx);
-                                this.retry_confirm = Some((c.held_revision, c.settings.clone()));
-                            }
+        let notice = c.notice.clone();
+        let shortcut = c.settings.toggle_shortcut.clone();
+        let device = if c.settings.device.is_empty() {
+            "System default".to_owned()
+        } else {
+            c.settings.device.clone()
+        };
+        let model = c.settings.model.clone();
+        let empty = c.transcript.is_empty();
+        let shortcut_error = c.shortcut_error.clone();
+        div().flex().flex_col().size_full().min_h_0()
+            .child(div().id("recording-controls").flex_shrink_0().flex().flex_col().gap_3().p_5()
+                .bg(cx.theme().muted).border_b_1().border_color(cx.theme().border)
+                .child(div().flex().flex_wrap().items_center().gap_3()
+                    .child(Button::new("record").label(if recording { "Stop and transcribe" } else { "Start recording" })
+                        .disabled(busy || held)
+                        .on_click(cx.listener(|this, _, _, cx| { this.controller.update(cx, |c, cx| c.toggle(false, cx)); })))
+                    .when(recording || busy, |el| el.child(Button::new("cancel").ghost().label("Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| { this.controller.update(cx, |c, cx| c.cancel(cx)); this.retry_confirm = None; }))))
+                    .child(div().id("recording-status").text_sm().text_color(status_color).child(status))
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(shortcut)))
+                .when(recording, |el| el.child(Progress::new("microphone-level").value(level * 100.0)))
+                .child(div().flex().flex_wrap().items_center().gap_2()
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Language"))
+                    .children(choices.into_iter().map(|code| {
+                        let selected = code == current_language;
+                        Button::new(SharedString::from(format!("quick-language-{code}"))).small()
+                            .label(language::short_label(&code)).selected(selected)
+                            .tooltip(language::name(&code).to_owned())
+                            .on_click(cx.listener(move |this, _, _, cx| { this.controller.update(cx, |c, cx| { c.select_language(&code, cx); }); }))
+                    }))
+                    .child(Button::new("quick-preferences").ghost().small().label("More…")
+                        .on_click(cx.listener(|this, _, _, cx| { crate::quick_preferences::show(this.controller.clone(), cx); }))))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(format!("Microphone: {device}")))
+                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(format!("Model: {model}")))
+                .when(recording || busy, |el| el.child(hint("Changes apply to the next recording; the current recording keeps its original settings.", cx)))
+                .when_some(selection_error, |el, error| el.child(error_text(error, cx)))
+                .when_some(shortcut_error, |el, error| el.child(error_text(error, cx))))
+            .when(held && !busy, |el| el.child(self.render_recovery(cx)))
+            .child(div().flex().flex_col().flex_1().min_h_0().gap_3().p_5()
+                .child(div().flex().items_center().justify_between().gap_3()
+                    .child(div().text_lg().font_weight(FontWeight::MEDIUM).child("Latest transcript"))
+                    .child(Button::new("copy-now").small().label(if self.copied { "Copied" } else { "Copy" }).disabled(empty)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(this.controller.read(cx).transcript.clone()));
+                            this.copied = true;
                             cx.notify();
-                        })))
+                        }))))
+                .when(empty, |el| el.child(hint("Start a recording to see your transcript. Audio and transcripts are not saved to disk.", cx)))
+                .child(div().flex_1().min_h_0().child(Textarea::new(&self.transcript).aria_label("Latest transcript").readonly(true).h_full()))
+                .child(div().id("dictation-notice").text_sm().text_color(cx.theme().muted_foreground).child(notice)))
+    }
+
+    fn render_recovery(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let description = self.retry_confirm.as_ref().map(|(_, s)| format!(
+            "Upload retained audio to {} using {} · {}? Retry does not copy, paste, or chime.",
+            s.base_url, s.model, language::name(&s.language)
+        )).unwrap_or_else(|| "Audio is held in memory. Retry uses saved settings; change the destination in Settings first.".into());
+        div()
+            .id("audio-recovery")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_5()
+            .py_3()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Recording retained"),
+            )
+            .child(div().text_sm().child(description))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("retry")
+                            .label(if self.retry_confirm.is_some() {
+                                "Upload audio"
+                            } else {
+                                "Review retry"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some((revision, snapshot)) = this.retry_confirm.take() {
+                                    this.controller.update(cx, |c, cx| {
+                                        c.confirm_retry(revision, &snapshot, cx)
+                                    });
+                                } else {
+                                    let c = this.controller.read(cx);
+                                    this.retry_confirm =
+                                        Some((c.held_revision, c.settings.clone()));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("discard-audio")
+                            .ghost()
+                            .label("Discard audio")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.controller.update(cx, |c, cx| c.cancel(cx));
+                                this.retry_confirm = None;
+                            })),
+                    ),
+            )
+    }
+
+    fn render_appearance(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = self.controller.read(cx);
+        let selected = match c.settings.theme {
+            ThemePreference::System => 0,
+            ThemePreference::Light => 1,
+            ThemePreference::Dark => 2,
+        };
+        let error = c.theme_error.clone();
+        section("Appearance")
+            .child(field("Theme", RadioGroup::horizontal("theme-preference")
+                .children(["System", "Light", "Dark"]).selected_index(Some(selected))
+                .on_change(cx.listener(|this, ix, _, cx| {
+                    let preference = match *ix { 1 => ThemePreference::Light, 2 => ThemePreference::Dark, _ => ThemePreference::System };
+                    this.controller.update(cx, |c, cx| { c.select_theme(preference, cx); });
+                }))))
+            .child(hint("Saved immediately. System follows your desktop’s appearance; light is used when no preference is available.", cx))
+            .when_some(error, |el, error| el.child(error_text(error, cx)))
+    }
+
+    fn render_connection(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = self.controller.read(cx);
+        let changed = self.url.read(cx).value().as_ref() != c.settings.base_url
+            || self.key.read(cx).unmask_value().as_ref() != c.settings.api_key;
+        let checking = c.checking;
+        let connection = c.connection.clone();
+        section("Connection")
+            .child(field(
+                "Backend URL",
+                Input::new(&self.url).aria_label("Backend URL"),
             ))
-            .child(div().text_lg().child("Backend"))
-            .child("HTTP(S) URL")
-            .child(Input::new(&self.url))
-            .child("API key (session only)")
-            .child(Input::new(&self.key))
-            .child(div().flex().gap_2().items_center()
-                .child(Button::new("check").label(if checking { "Checking…" } else { "Save and check connection" }).disabled(checking)
-                    .on_click(cx.listener(|this, _, window, cx| { if !this.apply(window, cx) { return; } this.retry_confirm = None; this.controller.update(cx, |c, cx| c.check(cx)); })))
-                .child(div().text_sm().child(connection)))
-            .child("Transcription model")
-            .child(Select::new(&self.model).placeholder("Check connection to discover models"))
-            .child("Language")
-            .child(Input::new(&self.language))
-            .child("Quick languages (comma-separated)")
-            .child(Input::new(&self.quick_languages))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Example: auto, en, de. Button order is also the language-cycle order."))
-            .when_some(self.validation_error.clone(), |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))
-            .child("Microphone")
-            .child(Select::new(&self.device))
-            .child(div().text_lg().child("Keyboard shortcuts"))
-            .child("Recording toggle (system-wide)")
-            .child(Input::new(&self.shortcut))
-            .child("Cancel / discard (system-wide)")
-            .child(Input::new(&self.cancel_shortcut))
-            .child("Cycle quick languages (system-wide)")
-            .child(Input::new(&self.language_shortcut))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground)
-                .child("Choose different combinations, then Save settings. Cancel stops recording/transcription and discards temporary audio. Examples: Ctrl+Alt+Space, Super+Shift+R, Ctrl+F9. Ctrl+Q is reserved for hide/quit; Ctrl+V and Ctrl+Shift+V for paste."))
-            .when_some(shortcut_error, |el, error| el.child(div().text_sm().text_color(cx.theme().danger).child(error)))
-            .child(div().text_lg().child("After transcription"))
+            .child(field(
+                "API key",
+                Input::new(&self.key).aria_label("API key"),
+            ))
+            .child(hint("The API key is kept for this session only.", cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("check")
+                            .label(if checking {
+                                "Checking…"
+                            } else {
+                                "Refresh models"
+                            })
+                            .disabled(checking || changed)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.controller.update(cx, |c, cx| c.check(cx));
+                            })),
+                    )
+                    .child(div().text_sm().child(connection)),
+            )
+            .when(changed, |el| {
+                el.child(hint(
+                    "Save connection changes before refreshing models.",
+                    cx,
+                ))
+            })
+            .child(field(
+                "Transcription model",
+                Select::new(&self.model)
+                    .accessibility_label("Transcription model")
+                    .placeholder("Refresh models to discover choices")
+                    .menu_max_h(rems(12.)),
+            ))
+    }
+
+    fn render_audio_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        section("Audio & language")
+            .child(field("Microphone", Select::new(&self.device).accessibility_label("Microphone").menu_max_h(rems(12.))))
+            .child(field("Language", Input::new(&self.language).aria_label("Language")))
+            .child(hint("Leave blank for automatic detection, or enter a code such as en or de. Model language support varies.", cx))
+            .child(field("Quick languages", Input::new(&self.quick_languages).aria_label("Quick languages")))
+            .child(hint("Comma-separated, for example auto, en, de. This order also controls language cycling.", cx))
+            .when_some(self.validation_error.clone(), |el, error| el.child(error_text(error, cx)))
+    }
+
+    fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = self.controller.read(cx);
+        let status = c.shortcut.clone();
+        let error = c.shortcut_error.clone();
+        section("Shortcuts")
+            .child(field("Toggle recording", Input::new(&self.shortcut).aria_label("Toggle recording")))
+            .child(field("Cancel / discard audio", Input::new(&self.cancel_shortcut).aria_label("Cancel / discard audio")))
+            .child(field("Cycle quick languages", Input::new(&self.language_shortcut).aria_label("Cycle quick languages")))
+            .child(hint("System-wide, including while hidden. Choose distinct combinations with Ctrl, Alt, or Super. Ctrl+Q and paste shortcuts are reserved.", cx))
+            .child(hint(status, cx))
+            .when_some(error, |el, error| el.child(error_text(error, cx)))
+    }
+
+    fn render_behavior(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        section("Behavior")
+            .child(div().font_weight(FontWeight::MEDIUM).child("After transcription"))
             .child(Checkbox::new("copy").label("Copy to clipboard").checked(self.options.copy)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.copy = *value; cx.notify(); })))
-            .child(Checkbox::new("paste").label("Paste only if the original window is still active").checked(self.options.paste)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.paste = *value; cx.notify(); })))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Paste replaces the clipboard. If focus changes after preparation, paste is skipped but clipboard contents may change."))
-            .child(Checkbox::new("terminal").label("Use Ctrl+Shift+V for paste (terminals)").checked(self.options.terminal_paste)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.terminal_paste = *value; cx.notify(); })))
-            .child(Checkbox::new("chime").label("Enable completion chime (short tone)").checked(self.options.chime)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.chime = *value; cx.notify(); })))
-            .child(Checkbox::new("animate-bar").label("Animate recording and transcription in the bar").checked(self.options.animate_bar)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.animate_bar = *value; cx.notify(); })))
-            .child(Checkbox::new("quit-on-ctrl-q").label("Ctrl+Q quits application (otherwise hides)").checked(self.options.quit_on_ctrl_q)
-                .on_change(cx.listener(|this, value, _, cx| { this.options.quit_on_ctrl_q = *value; cx.notify(); })))
-            .child(Button::new("save").label("Save settings").on_click(cx.listener(|this, _, window, cx| { this.apply(window, cx); this.retry_confirm = None; })))
-            .child(div().text_lg().child("Latest transcript"))
-            .child(Textarea::new(&self.transcript).readonly(true).h_32())
-            .child(div().flex().gap_2()
-                .child(Button::new("copy-now").label("Copy transcript").disabled(empty)
-                    .on_click(move |_, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(controller.read(cx).transcript.clone())); }))
-                .child(Button::new("hide").label("Hide · Ctrl+Q").on_click(cx.listener(|this, _, window, cx| this.hide(window, cx))))
-                .child(Button::new("quit").label("Quit application").on_click(|_, _, cx| cx.quit())))
+                .on_change(cx.listener(|this, value, _, cx| { this.options.copy = *value; this.form_feedback = None; cx.notify(); })))
+            .child(Checkbox::new("paste").label("Paste if the original window is active").checked(self.options.paste)
+                .on_change(cx.listener(|this, value, _, cx| { this.options.paste = *value; this.form_feedback = None; cx.notify(); })))
+            .child(hint("Paste replaces the clipboard. If focus changes, paste may be skipped while clipboard contents still change.", cx))
+            .child(Checkbox::new("terminal").label("Use Ctrl+Shift+V for terminal paste").checked(self.options.terminal_paste)
+                .on_change(cx.listener(|this, value, _, cx| { this.options.terminal_paste = *value; this.form_feedback = None; cx.notify(); })))
+            .child(Checkbox::new("chime").label("Play a completion chime").checked(self.options.chime)
+                .on_change(cx.listener(|this, value, _, cx| { this.options.chime = *value; this.form_feedback = None; cx.notify(); })))
+            .child(div().mt_2().font_weight(FontWeight::MEDIUM).child("Application"))
+            .child(Checkbox::new("animate-bar").label("Animate recording status in the bar").checked(self.options.animate_bar)
+                .on_change(cx.listener(|this, value, _, cx| { this.options.animate_bar = *value; this.form_feedback = None; cx.notify(); })))
+            .child(Checkbox::new("quit-on-ctrl-q").label("Ctrl+Q quits instead of hiding").checked(self.options.quit_on_ctrl_q)
+                .on_change(cx.listener(|this, value, _, cx| { this.options.quit_on_ctrl_q = *value; this.form_feedback = None; cx.notify(); })))
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dirty = self.is_dirty(cx);
+        let feedback = self.form_feedback.clone().unwrap_or_else(|| {
+            if dirty {
+                "Unsaved changes"
+            } else {
+                "Settings are up to date"
+            }
+            .into()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(rems(44.))
+                            .mx_auto()
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_6()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("Settings"),
+                                    )
+                                    .child(hint(
+                                        "Configure your connection and dictation preferences.",
+                                        cx,
+                                    )),
+                            )
+                            .child(self.render_appearance(cx))
+                            .child(self.render_connection(cx))
+                            .child(self.render_audio_settings(cx))
+                            .child(self.render_shortcuts(cx))
+                            .child(self.render_behavior(cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(rems(44.))
+                            .mx_auto()
+                            .px_5()
+                            .py_3()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .text_color(
+                                        if self.form_error && self.form_feedback.is_some() {
+                                            cx.theme().danger
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        },
+                                    )
+                                    .child(feedback),
+                            )
+                            .child(
+                                Button::new("save")
+                                    .label("Save settings")
+                                    .disabled(!dirty && !self.form_error)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.apply(window, cx);
+                                        this.retry_confirm = None;
+                                    })),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn section(title: &'static str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(div().text_lg().font_weight(FontWeight::MEDIUM).child(title))
+}
+
+fn field(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_sm().child(label))
+        .child(control)
+}
+
+fn hint(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
+}
+
+fn error_text(text: String, cx: &App) -> Div {
+    div().text_sm().text_color(cx.theme().danger).child(text)
+}
+
+impl Render for DictationView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let quit_on_ctrl_q = self.controller.read(cx).settings.quit_on_ctrl_q;
+        div()
+            .id("dictation-window")
+            .key_context("Speaches")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::close_or_quit))
+            .on_action(|_: &QuitApplication, _, cx| cx.quit())
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.change_tab(WorkspaceTab::Settings, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowDictation, window, cx| {
+                this.change_tab(WorkspaceTab::Dictation, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveSettings, window, cx| {
+                if this.tab == WorkspaceTab::Settings {
+                    this.apply(window, cx);
+                    this.retry_confirm = None;
+                }
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .min_h_0()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(self.render_header(cx))
+            .child(div().flex_1().min_h_0().min_w_0().child(match self.tab {
+                WorkspaceTab::Dictation => self.render_dictation(cx).into_any_element(),
+                WorkspaceTab::Settings => self.render_settings(cx).into_any_element(),
+            }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_5()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if self.tab == WorkspaceTab::Settings {
+                                "Ctrl+S · Save settings"
+                            } else {
+                                "Ctrl+, · Settings"
+                            }),
+                    )
+                    .child(
+                        Button::new("hide")
+                            .ghost()
+                            .small()
+                            .label(if quit_on_ctrl_q {
+                                "Hide"
+                            } else {
+                                "Hide · Ctrl+Q"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| this.hide(window, cx))),
+                    ),
+            )
     }
 }

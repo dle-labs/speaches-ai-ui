@@ -2,6 +2,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Settings {
@@ -19,6 +28,7 @@ pub(crate) struct Settings {
     pub(crate) language_shortcut: String,
     pub(crate) quick_languages: Vec<String>,
     pub(crate) animate_bar: bool,
+    pub(crate) theme: ThemePreference,
     #[serde(skip)]
     pub(crate) api_key: String,
 }
@@ -40,6 +50,7 @@ impl Default for Settings {
             language_shortcut: "Ctrl+Alt+Shift+L".into(),
             quick_languages: crate::language::default_quick_languages(),
             animate_bar: true,
+            theme: ThemePreference::default(),
         }
     }
 }
@@ -144,6 +155,33 @@ mod tests {
         assert!(saved.chime);
         let saved_off: Settings = serde_json::from_str(r#"{"chime":false}"#).unwrap();
         assert!(!saved_off.chime);
+    }
+    #[test]
+    fn legacy_settings_default_to_system_theme() {
+        let settings: Settings = serde_json::from_str(r#"{"copy":true}"#).unwrap();
+        assert_eq!(settings.theme, ThemePreference::System);
+        assert!(settings.copy);
+    }
+    #[test]
+    fn theme_preferences_round_trip_as_snake_case() {
+        for (preference, name) in [
+            (ThemePreference::System, "system"),
+            (ThemePreference::Light, "light"),
+            (ThemePreference::Dark, "dark"),
+        ] {
+            let settings = Settings {
+                theme: preference,
+                ..Settings::default()
+            };
+            let encoded = serde_json::to_value(&settings).unwrap();
+            assert_eq!(encoded["theme"], name);
+            let restored: Settings = serde_json::from_value(encoded).unwrap();
+            assert_eq!(restored.theme, preference);
+        }
+    }
+    #[test]
+    fn invalid_theme_is_rejected_instead_of_silently_reset() {
+        assert!(serde_json::from_str::<Settings>(r#"{"theme":"blue"}"#).is_err());
     }
     #[test]
     fn output_defaults_do_not_modify_clipboard_or_type() {

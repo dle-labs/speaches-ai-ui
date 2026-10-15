@@ -1,6 +1,6 @@
 use crate::{
     audio, backend, language,
-    settings::Settings,
+    settings::{Settings, ThemePreference},
     status::{BarSnapshot, Status},
     x11::{Desktop, HotkeyAction, Target},
 };
@@ -40,6 +40,7 @@ pub(crate) struct Controller {
     pub(crate) window: Option<AnyWindowHandle>,
     pub(crate) quick_window: Option<AnyWindowHandle>,
     pub(crate) selection_error: Option<String>,
+    pub(crate) theme_error: Option<String>,
     pub(crate) language_revision: u64,
     pub(crate) model_selection_revision: u64,
     pub(crate) recording: Option<audio::Recording>,
@@ -107,6 +108,7 @@ impl Controller {
             window: None,
             quick_window: None,
             selection_error: None,
+            theme_error: None,
             language_revision: 0,
             model_selection_revision: 0,
             recording: None,
@@ -203,6 +205,28 @@ impl Controller {
             Ok(()) => "Settings saved. API key is kept only for this session.".into(),
             Err(_) => "Settings applied for this session, but could not be saved.".into(),
         };
+        cx.notify();
+        true
+    }
+    /// Persists only the appearance preference, leaving unrelated drafts untouched.
+    pub(crate) fn select_theme(
+        &mut self,
+        preference: ThemePreference,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.settings.theme != preference {
+            let mut next = self.settings.clone();
+            next.theme = preference;
+            if next.save().is_err() {
+                self.theme_error =
+                    Some("Could not save theme. Previous theme retained. Try again.".into());
+                cx.notify();
+                return false;
+            }
+            self.settings = next;
+        }
+        self.theme_error = None;
+        crate::appearance::apply(preference, cx);
         cx.notify();
         true
     }
@@ -439,9 +463,6 @@ impl Controller {
                 _ => Status::Ready,
             }
         }
-    }
-    pub(crate) fn status(&self) -> String {
-        self.state().text()
     }
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
         if matches!(self.feedback, Feedback::Finished(at) if at.elapsed() >= Duration::from_secs(4))

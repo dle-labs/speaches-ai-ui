@@ -4,7 +4,8 @@ This is an end-to-end prototype, not completion of every V1 phase.
 
 ## Implemented
 
-- Native gpui-kit window composed from Button, Checkbox, Input, Select, Textarea, and Progress.
+- Native gpui-kit Dictation/Settings workspace composed from Button, TabBar, RadioGroup, Checkbox, Input, Select, Textarea, and Progress. Dictation has a recording toolbar, human-readable status, growing transcript area, and explicit retained-audio recovery. Settings has grouped forms, visible draft state, and a fixed save bar; Refresh models no longer saves unrelated drafts.
+- Persisted System/Light/Dark appearance, applied immediately to every app window. System follows live XDG portal changes, including while hidden or using only Quick preferences; missing/no preference falls back to light. Failed theme persistence keeps the previous preference and appearance.
 - Editable backend URL (default `http://localhost:9791`), session-only API key, STT model discovery, language, microphone selection, and persisted non-secret settings.
 - CPAL capture, bounded mono PCM16 WAV, one asynchronous reqwest transcription on an app-owned Tokio runtime, cancellation, and retained audio for explicit retry/discard.
 - Configurable native X11 recording toggle (default Ctrl+Alt+Space) and cancel/discard shortcut (default Ctrl+Shift+X). Both bind transactionally; cancel takes priority over queued toggles and uses the existing cancellation path without focusing/showing the window. Focus/lifetime checks, modifier-release guard, Ctrl+V or Ctrl+Shift+V injection, copy, and completion chime.
@@ -20,7 +21,7 @@ This is an end-to-end prototype, not completion of every V1 phase.
 
 - `cargo check --locked`: passed.
 - `cargo build --locked`: passed using Rust 1.99.0 and gpui-kit 0.7.3.
-- `cargo test --locked`: **61 passed**, including WAV/downmix/capture limits, URL/auth/multipart/mock responses, redirect non-forwarding, secret exclusion, settings migration/persistence, shortcut parsing, and X11 repeat/lifetime policy tests. One isolated-display test is ignored in the default run.
+- `cargo test --locked`: **66 passed**, including WAV/downmix/capture limits, URL/auth/multipart/mock responses, redirect non-forwarding, secret exclusion, settings migration/persistence, shortcut parsing, and X11 repeat/lifetime policy tests. One isolated-display test is ignored in the default run.
 - `xvfb-run -a cargo test --locked x11::tests::x11_rebind_is_transactional -- --ignored --test-threads=1`: passed. Real X11 grabs verify all three actions, cancel/cycle priority, duplicate rejection, binding swaps, held-key/repeat handling, failed third-binding rollback without leaked grabs, old-binding preservation, and CapsLock/NumLock variants without microphone use.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
 - `cargo fmt --all --check`: passed.
@@ -30,13 +31,15 @@ This is an end-to-end prototype, not completion of every V1 phase.
 - `tests/bar_smoke.py` passed against fake local IPC: colored output, recording pulse, transcription frames, quiet idle/reduced-motion states, left/right/middle click dispatch, language labels, and EOF shutdown. Installed i3xrocks persistent JSON output/click forwarding were separately exercised in an isolated harness. No live bar was restarted.
 - `tests/install_local_smoke.py`: **10 passed**, covering first install, repeat/update, retained settings/custom blocks, launcher escaping/validation, preflight failure, and startup-failure rollback. Tests use mocked app/build/i3 commands and isolated directories, not the user's installation.
 - `tests/preferences_smoke.py` passed under isolated Xvfb with mock HTTP: compact-only startup, real searchable Select keyboard interactions, model/language persistence, invalid-model recovery, global cycling while hidden, Escape/focus-loss dismissal, same-value quick choice overriding its own draft while preserving unrelated drafts, external selection sync, and save-failure rollback/recovery. Panel/main screenshots inspected. No microphone or live backend inference was used.
+- `tests/theme_smoke.py` passed under isolated Xvfb: theme persistence/restart, immediate-save draft isolation, explicit form saves preserving the latest theme, hidden/recreated/quick windows, failed-save rollback/recovery, and radio activation via Tab/Space. Light/dark and 540×540, 760×760, and wide-window screenshots were inspected.
+- `tests/system_theme_smoke.py` passed with an isolated fake XDG portal under `dbus-run-session` + Xvfb: startup/live appearance, hidden and quick-only updates, fixed overrides, returning to System, and no-preference Light fallback. A read-only probe of the real Regolith portal returned its current Light preference; the real desktop theme was not changed.
 - A read-only live probe verified `/health`, `/openapi.json`, and `/v1/models`; see backend-api.md.
 
 No automated check captured the user's microphone or uploaded real speech. Live transcription correctness, real microphone quality, completion sound, paste into browser/editor/terminal, lock-key variations, and multi-monitor layout need user-assisted validation. The user reported the earlier installation working; the new animation and desktop-entry update still need activation through the installer. Mock HTTP and pure X11-policy tests are not proof of those integrations.
 
 ## Deliberate prototype limitations
 
-- Main UI remains a scrollable utility form; the small native quick-preferences dialog is separate. It uses managed dialog behavior for reliable X11 focus/floating, not an unsupported anchored popup.
+- Settings forms scroll independently of the main recording/transcript workspace. Form drafts survive tab switches but are discarded when the main window is hidden/closed. The small native quick-preferences dialog is separate. It uses managed dialog behavior for reliable X11 focus/floating, not an unsupported anchored popup.
 - Global recording/cancel/language shortcut changes apply together on Save settings and survive restart. Validation, duplicates, and conflicts preserve all previous working bindings. Modifier/key names are typed into an existing gpui-kit Input, not captured by a custom control. i3 bindings to `speaches-ai toggle`, `speaches-ai cancel`, and `speaches-ai language-next` are alternatives. Keyboard mapping changes disable native shortcut/paste with feedback until restart.
 - Failed/limit-held audio blocks new capture until retry/discard, rather than implementing V1's two-recording resolution UI. Retry requires explicit confirmation bound to the audio revision and saved settings; edits or replacement invalidate that consent. Manual retry has no automatic outputs.
 - Device failures discard incomplete audio. Duration/memory limits retain valid bounded audio for explicit submission, never automatic submission.
@@ -47,4 +50,4 @@ No automated check captured the user's microphone or uploaded real speech. Live 
 
 ## Next user check
 
-Run `cargo run --locked`, save/check the backend, choose microphone/model, and try a short recording with automatic paste disabled first. Verify the transcript manually. Then test copy and guarded paste into a disposable text editor before enabling it in routine work. Configure the optional bar block only after the basic flow is working.
+Run `cargo run --locked`, open Settings, save the backend URL, refresh models, choose microphone/model, and save. Check Appearance in both windows and try a short recording with automatic paste disabled first. Verify the transcript manually. Then test copy and guarded paste into a disposable text editor before enabling it in routine work. Configure the optional bar block only after the basic flow is working.

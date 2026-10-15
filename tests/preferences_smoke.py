@@ -146,30 +146,50 @@ with (base / "application.log").open("w") as log:
         wait(lambda: not windows("Quick preferences"), "focus-loss dismissal")
         time.sleep(0.3)
         subprocess.run(["import", "-window", main_window, str(base / "main.png")], env=env, check=True)
-        # Coordinate fallback for main-form inputs: these positions were checked
-        # against the actual 660x820 Xvfb render saved above. Never click Record.
+        key("ctrl+2")  # Settings is a separate view; Ctrl+1 returns to Dictation.
+        # Coordinate fallback checked against the actual 760x760 Xvfb settings
+        # render. Other controls are exercised by keyboard. Never click Record.
         def click_at(x, y):
             subprocess.run(["xdotool", "mousemove", "--window", main_window, str(x), str(y), "click", "1"], env=env, check=True)
             time.sleep(0.15)
 
-        def input_text(x, y):
-            click_at(x, y)
+        def top_of_settings():
+            subprocess.run(["xdotool", "mousemove", "--window", main_window, "730", "400",
+                            "click", "--repeat", "25", "--delay", "10", "4"], env=env, check=True)
+            time.sleep(0.2)
+
+        def focused_text():
             key("ctrl+a")
             key("ctrl+c")
             return subprocess.check_output(["xclip", "-selection", "clipboard", "-out"], env=env, text=True, timeout=3)
 
-        click_at(180, 393)
+        def focus_language():
+            top_of_settings()
+            click_at(180, 409)
+            # API key, model, microphone, language. Refresh is disabled while the
+            # connection has an unsaved draft, so it is not a Tab stop.
+            for _ in range(4):
+                key("Tab")
+
+        click_at(180, 409)
         key("ctrl+a")
         type_text("http://unsaved.example.invalid")
-        click_at(180, 683)
+        focus_language()
         key("ctrl+a")
         type_text("fr")
-        click_at(245, 156)  # Explicitly choosing already-active DE must replace the FR draft.
-        assert input_text(180, 683) == "de"
-        assert input_text(180, 393) == "http://unsaved.example.invalid", "Unrelated draft was clobbered"
+        assert focused_text() == "fr"
+        key("ctrl+1")
+        click_at(209, 130)  # Explicitly choosing already-active DE must replace FR.
+        key("ctrl+2")
+        focus_language()
+        assert focused_text() == "de"
+        top_of_settings()
+        click_at(180, 409)
+        assert focused_text() == "http://unsaved.example.invalid", "Unrelated draft was clobbered"
         command("language", "en")
         wait(lambda: selection().get("language") == "en", "external selection sync")
-        assert input_text(180, 683) == "en"
+        focus_language()
+        assert focused_text() == "en"
         saved = json.loads(settings_path.read_text())
         assert saved["base_url"] == f"http://127.0.0.1:{server.server_port}", "Quick choice saved unrelated draft"
         settings_path.parent.chmod(0o500)
@@ -184,6 +204,12 @@ with (base / "application.log").open("w") as log:
         command("language", "fr")
         wait(lambda: selection().get("language") == "fr" and selection().get("error") is None,
              "selection persistence recovery")
+        # Saving explicitly must preserve the unrelated draft AND the newest
+        # immediately saved language, rather than writing stale form state.
+        key("ctrl+s")
+        wait(lambda: json.loads(settings_path.read_text())["base_url"] == "http://unsaved.example.invalid",
+             "explicit settings save")
+        assert json.loads(settings_path.read_text())["language"] == "fr"
         assert command("quit") == "OK"
         process.wait(timeout=5)
         assert process.returncode == 0

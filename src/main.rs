@@ -1,3 +1,4 @@
+mod appearance;
 mod audio;
 mod backend;
 mod bar;
@@ -68,8 +69,15 @@ fn main() -> Result<()> {
             gpui_kit::init(cx);
             quick_preferences::init(cx);
             cx.set_app_identity("speaches-ai", "Speaches AI");
-            cx.bind_keys([KeyBinding::new("ctrl-q", ui::CloseOrQuit, Some("Speaches"))]);
+            cx.bind_keys([
+                KeyBinding::new("ctrl-q", ui::CloseOrQuit, Some("Speaches")),
+                KeyBinding::new("ctrl-,", ui::OpenSettings, Some("Speaches")),
+                KeyBinding::new("ctrl-1", ui::ShowDictation, Some("Speaches")),
+                KeyBinding::new("ctrl-2", ui::OpenSettings, Some("Speaches")),
+                KeyBinding::new("ctrl-s", ui::SaveSettings, Some("Speaches")),
+            ]);
             let controller = cx.new(|_| controller::Controller::new(runtime));
+            appearance::apply(controller.read(cx).settings.theme, cx);
             if command == "preferences" {
                 quick_preferences::show(controller.clone(), cx);
             } else {
@@ -81,6 +89,10 @@ fn main() -> Result<()> {
                         .timer(Duration::from_millis(50))
                         .await;
                     cx.update(|cx| {
+                        // No App-level appearance subscription exists in GPUI 0.3.9.
+                        // Reuse the resident loop rather than a window-bound observer,
+                        // so hidden / quick-preferences-only sessions follow System.
+                        appearance::apply(controller.read(cx).settings.theme, cx);
                         while let Ok(command) = server.commands.try_recv() {
                             match command.as_str() {
                                 "show" => ui::show(controller.clone(), cx),

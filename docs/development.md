@@ -20,6 +20,8 @@ The user installed these prerequisites. No system packages were installed by the
 ## Runtime decisions
 
 - GPUI runs its native event loop with `QuitMode::Explicit`. Closing/hiding removes the visible window; the retained application controller remains alive. A show command creates a fresh view over that controller.
+- The main view owns the selected Dictation/Settings tab, retained field entities, and unsaved form draft. Recording, recovery, and saved preferences remain app-owned in Controller. Theme selection persists only the theme and applies immediately; form saves merge the latest saved theme rather than overwriting it with a stale draft.
+- `appearance::apply` maps System/Light/Dark to the global GPUI Component theme and refreshes all windows only when the effective mode changes. GPUI receives Linux appearance changes via the XDG desktop portal; the resident loop synchronizes even with no main window. Missing/no preference means Light. The external bar palette is independent.
 - An application-owned Tokio runtime (two workers) runs reqwest. Results cross a bounded channel; the GPUI foreground controller consumes them. Request tasks are abortable, and attempt IDs reject late results. Discovery has a separate revision.
 - Audio callbacks write to a fixed-capacity buffer without waiting on locks. Encoding currently occurs during stop on the app thread; optimize this into a bounded worker before claiming final V1 responsiveness at the five-minute limit.
 - Native X11 integration uses x11rb/XTest. Short queries are synchronous X-server round trips. The adapter fails closed on keyboard mapping changes; restart is needed in this prototype.
@@ -36,5 +38,16 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo build --locked -j 2
 ./target/debug/speaches-ai
 ```
+
+Optional isolated real-window checks (no microphone capture or live audio uploads):
+
+```sh
+xvfb-run -a python tests/desktop_smoke.py /absolute/artifact-dir/desktop
+xvfb-run -a python tests/preferences_smoke.py /absolute/artifact-dir/preferences
+xvfb-run -a python tests/theme_smoke.py /absolute/artifact-dir/themes
+dbus-run-session -- xvfb-run -a python tests/system_theme_smoke.py /absolute/artifact-dir/system-theme
+```
+
+These require Xvfb, xdotool, and ImageMagick; preferences also requires xclip. The portal test additionally requires dbus-python and PyGObject and refuses an already-owned portal name. It supplies a fake portal only inside a fresh D-Bus session, never changes desktop settings, and checks live system changes, fixed overrides, and hidden/quick-only sessions. Other tests use private settings/runtime directories. Screenshot/coordinate fallbacks are documented in the tests; inspect captures after layout changes.
 
 Use a graphical X11 session with a working Vulkan driver. GUI execution under a headless SSH session does not validate real desktop behavior. Read [prototype-status.md](prototype-status.md) for actual test evidence and remaining gaps.

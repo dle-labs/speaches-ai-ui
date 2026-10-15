@@ -37,7 +37,7 @@ Replace `user@backend-host` with your backend host's SSH login and keep the tunn
 
 **`deepdml/faster-whisper-large-v3-turbo-ct2`** is the currently recommended model for this setup and the model used with the GTX 1070 Ti. It is also the UI's default model. This is a recommendation for this particular setup, not a universal hardware compatibility guarantee.
 
-Use **Save and check connection** to discover available speech-to-text models, then select this model and save your settings. Model listing alone does not prove inference readiness; confirm the setup with a short recording and transcription.
+In **Settings → Connection**, save your backend URL with **Save settings**, then use **Refresh models** to discover available speech-to-text models. Select this model and save again. Model listing alone does not prove inference readiness; confirm the setup with a short recording and transcription.
 
 ## Run
 
@@ -48,18 +48,26 @@ I wonder how good we can make this.
 The initial build is substantial. On a memory-constrained development session use `cargo build --locked -j 2`, then `./target/debug/speaches-ai`.
 
 Default backend: **http://localhost:9791** (your local SSH forward must be running).
-Default model: `deepdml/faster-whisper-large-v3-turbo-ct2`. Use **Save and check connection** to discover available STT models. Model listing does not prove inference readiness.
+Default model: `deepdml/faster-whisper-large-v3-turbo-ct2`. Use **Settings → Connection → Refresh models** to discover available STT models after saving connection changes. Model listing does not prove inference readiness.
 
-1. Select the backend/model, language (blank = automatic), and microphone.
-2. Select completion actions and **Save settings**. Copy, paste, and the completion chime are initially off. Enable **Enable completion chime (short tone)** for a quiet 100 ms tone, then Save settings. Existing saved chime preferences are preserved.
-3. Set **Keyboard shortcuts → Recording toggle**, then **Save settings** (default: **Ctrl+Alt+Space**).
+1. Open **Settings** (Ctrl+, or Ctrl+2). Save your backend URL, refresh models, then choose a model, language (blank = automatic), and microphone.
+2. Choose completion actions under **Behavior** and **Save settings** (Ctrl+S). Copy, paste, and the completion chime are initially off. Enable **Play a completion chime** for a quiet 100 ms tone, then Save settings. Existing saved chime preferences are preserved.
+3. Set **Shortcuts → Toggle recording**, then **Save settings** (default: **Ctrl+Alt+Space**). Return to **Dictation** with Ctrl+1.
 4. Choose a language using the quick buttons, or right-click the bar indicator for compact model/language preferences. **Ctrl+Alt+Shift+L** cycles quick languages without opening a window.
 5. Hide the window, focus your destination, and press the recording shortcut to start. Press it again to stop and transcribe. Press **Ctrl+Shift+X** to cancel recording/transcription or discard held audio instead (also configurable).
 6. Reopen the app to read or copy the latest transcript.
 
 The visible Record button works too, but does not guess a paste destination. Full-form edits take effect after Save; quick choices apply immediately to future recordings. A running recording/request keeps its original snapshot.
 
-**Ctrl+Q hides**, unless the saved “Ctrl+Q quits application” setting is enabled. The close button always hides. **Quit application** always exits. Hidden windows are recreated from app-owned state; audio/network operations survive hiding.
+**Ctrl+Q hides**, unless the saved “Ctrl+Q quits instead of hiding” setting is enabled. The close button always hides. **Quit application** always exits. Hidden windows are recreated from app-owned state; audio/network operations survive hiding.
+
+### Workspace and appearance
+
+**Dictation** keeps recording controls and the latest transcript together. **Settings** groups Appearance, Connection, Audio & language, Shortcuts, and Behavior. Tab and Shift+Tab navigate controls; Space activates theme radios. The window menu contains **Quit application**.
+
+Under **Settings → Appearance → Theme**, choose **System** (default), **Light**, or **Dark**. Theme choices apply and save immediately across the main window and Quick preferences, without saving other unfinished edits. System follows the desktop’s XDG portal appearance preference, including changes while hidden; missing/no preference falls back to light. The choice survives restarts. The external Regolith bar keeps its own palette.
+
+Other settings require **Save settings**; the save bar and Settings tab identify unsaved changes. **Refresh models** uses the saved connection and never saves the form. Save connection edits before refreshing. Drafts survive tab switches, but not hiding/closing the main window. Retried audio uses saved settings and requires a destination review before upload; reviewing does not save drafts.
 
 ```sh
 ./target/debug/speaches-ai show    # launch or reveal existing window
@@ -123,7 +131,7 @@ Copy the supplied block into the established user `conf.d` directory. It runs on
 
 Right-click opens a small native floating **Quick preferences** panel, not the full app. It uses searchable language/model selectors, displays the current choices, and saves selections immediately. **Refresh models** performs model discovery only; selecting an ID does not explicitly load/unload a backend model. Model language support depends on the backend/model. Escape closes an open selector first, then the panel; Done or switching focus away also dismisses it. A native dialog is used for reliable i3 floating/focus behavior rather than an unsupported anchored X11 popup.
 
-Default quick languages are **Auto → English → German**. Edit **Quick languages (comma-separated)** in the main app, e.g. `en, de, fr`, then Save settings. One to eight languages can be configured; the order controls both buttons and keyboard/middle-click cycling. The compact language selector also offers the full language catalog.
+Default quick languages are **Auto → English → German**. Edit **Settings → Audio & language → Quick languages**, e.g. `en, de, fr`, then Save settings. One to eight languages can be configured; the order controls both buttons and keyboard/middle-click cycling. The compact language selector also offers the full language catalog.
 
 The bar shows the current language (`Auto`, `EN`, `DE`, etc.). Selections apply to the **next recording**; an active recording/request keeps its original model and language. If they differ, the bar shows e.g. `EN → DE` (active → next). Language changes do not change the model. Manual retry uses current settings only after renewed confirmation.
 
@@ -141,7 +149,7 @@ Small icons inherit the bar's font size, with a semantic palette tuned for Regol
 - **Rose warning triangle:** error.
 - **Muted crossed-out microphone:** app not running.
 
-Busy states animate at eight frames per second. Idle icons do not animate or repeatedly redraw, and idle IPC polling slows to once per second. Disable **Animate recording and transcription in the bar** and Save settings for static indicators. The installed FontAwesome and DejaVu Sans Mono fonts supply the glyphs. `speaches-ai status` remains plain text; `speaches-ai bar` provides a static colored alternative.
+Busy states animate at eight frames per second. Idle icons do not animate or repeatedly redraw, and idle IPC polling slows to once per second. Disable **Settings → Behavior → Animate recording status in the bar** and Save settings for static indicators. The installed FontAwesome and DejaVu Sans Mono fonts supply the glyphs. `speaches-ai status` remains plain text; `speaches-ai bar` provides a static colored alternative.
 
 Refresh using `i3-msg restart` only when ready. The persistent worker exits on stdin EOF, broken output, or termination signals. When supervising i3xrocks manually, stop its process group rather than sending SIGTERM to only its parent process, which can wait for a still-running worker.
 
